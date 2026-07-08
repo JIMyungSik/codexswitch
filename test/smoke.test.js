@@ -48,14 +48,20 @@ if (cmd === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0);
 if (cmd === 'exec') {
   const home = process.env.CODEX_HOME;
   if (!fs.existsSync(path.join(home, 'config.toml'))) { console.error('overlay missing config.toml'); process.exit(3); }
+  if (!process.argv.includes('--skip-git-repo-check')) { console.error('missing --skip-git-repo-check'); process.exit(4); }
+  const mi = process.argv.indexOf('-m');
+  const model = mi > -1 ? process.argv[mi + 1] : 'none';
   const auth = JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf8'));
-  if (auth.tokens.account_id === 'acc-a') {
+  const id = auth.tokens ? auth.tokens.account_id : 'apikey:' + auth.OPENAI_API_KEY.slice(0, 8);
+  if (id === 'acc-a') {
     console.error("You've hit your usage limit. Try again in 2 hours.");
     process.exit(1);
   }
-  auth.last_refresh = '2026-02-02T00:00:00Z'; // simulate a token refresh
-  fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(auth));
-  console.log('EXEC_OK ' + auth.tokens.account_id);
+  if (auth.tokens) {
+    auth.last_refresh = '2026-02-02T00:00:00Z'; // simulate a token refresh
+    fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(auth));
+  }
+  console.log('EXEC_OK ' + id + ' model=' + model);
   process.exit(0);
 }
 process.exit(0);
@@ -126,6 +132,39 @@ assert.strictEqual(storedB.last_refresh, '2026-02-02T00:00:00Z');
 
 // --- next: skips the limited account? only b is usable and b!=active ---
 r = run(['next']);
+assert.match(r.out, /now using "work-b"/);
+
+// --- model: persisted default is injected into exec ---
+run(['model', 'gpt-test-1']);
+r = run(['model']);
+assert.match(r.out, /gpt-test-1/);
+
+// --- order: rotation follows the configured order strictly ---
+run(['clear-limit', 'a@test.com']);
+r = run(['order', 'work-b', 'a@test.com']); // b first now
+assert.match(r.out, /1\. work-b/);
+r = run(['exec', 'hello']);
+assert.match(r.out, /EXEC_OK acc-b model=gpt-test-1/);
+assert.ok(!/rotating/.test(r.out), 'should start with work-b per order, no rotation');
+
+// user-provided -m must win over the stored default
+r = run(['exec', '-m', 'gpt-user-2', 'hello']);
+assert.match(r.out, /model=gpt-user-2/);
+
+// --- add-key: API-key account works and can be used in exec ---
+run(['add-key', 'api-acct', 'sk-test-1234567890']);
+r = run(['list']);
+assert.match(r.out, /api-acct/);
+assert.match(r.out, /\(api key\)/);
+r = run(['exec', '-a', 'api-acct', 'hello']);
+assert.match(r.out, /EXEC_OK apikey:sk-test-/);
+
+// --- next wraps around the order ---
+run(['remove', 'api-acct']);
+run(['use', 'work-b']); // order: work-b(0), a(1); active=b
+r = run(['next']);
+assert.match(r.out, /now using "a@test\.com"/);
+r = run(['next']); // wraps back
 assert.match(r.out, /now using "work-b"/);
 
 // --- disable everything -> exec must fail cleanly ---

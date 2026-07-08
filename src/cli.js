@@ -12,27 +12,33 @@ const HELP = `codexswitch — multi-account manager for the OpenAI Codex CLI
 Accounts
   login [name]            log in to a new account (isolated "codex login") and store it
   import [name]           import the account currently in ~/.codex/auth.json
+  add-key <name> [key]    register an OpenAI API-key account (or read $OPENAI_API_KEY)
   list                    list stored accounts (alias: accounts, status)
   use <name>              make <name> the active account in ~/.codex
   current                 show the active account
-  next                    rotate to the next usable account
+  next                    switch to the next account in rotation order (wraps around)
   remove <name>           delete a stored account
   rename <old> <new>      rename a stored account
   enable <name>           re-enable a disabled account
   disable <name>          temporarily exclude an account from rotation
-  priority <name> <n>     set rotation priority (lower = preferred, default 0)
+  order [name...]         show or set the rotation order in one command
+  priority <name> <n>     set one account's priority (lower = preferred, default 0)
   clear-limit <name>      forget a recorded rate-limit for an account
 
 Running codex
   run [name] [args...]    run codex as <name> (or active account) in an isolated
                           per-account CODEX_HOME; config/sessions are shared
-  exec [args...]          run "codex exec ..." and auto-rotate to the next
-                          account when a usage/rate limit is hit
+  exec [args...]          run "codex exec ..." and auto-rotate through accounts in
+                          rotation order when a usage/rate limit is hit
+                          (--skip-git-repo-check is added automatically)
       -a, --account <n>   start exec with a specific account
+
+Settings
+  model [name|default]    show/set the default model injected into run/exec
+  cooldown [minutes]      show/set rate-limit cooldown (default 60)
 
 Maintenance
   sync                    save tokens refreshed by codex back into the store
-  cooldown [minutes]      show/set rate-limit cooldown (default 60)
   help                    show this help
 
 Environment
@@ -164,10 +170,30 @@ function cmdCurrent() {
 }
 
 function cmdNext() {
-  const meta = store.loadMeta();
-  const next = store.pickAccount(meta.active ? [meta.active] : []);
+  const next = store.nextAccount();
   if (!next) throw new Error('no other usable account available');
   cmdUse([next.name]);
+}
+
+// Register an API-key account (Console/platform billing instead of a
+// ChatGPT plan). The key is stored only inside the account's auth.json.
+function cmdAddKey(args) {
+  const name = requireArg(args, 0, 'account name');
+  const key = args[1] || process.env.OPENAI_API_KEY;
+  if (!key) {
+    throw new Error(
+      'missing API key: pass it as the second argument or set OPENAI_API_KEY in the environment'
+    );
+  }
+  if (!/^sk-/.test(key)) throw new Error('that does not look like an OpenAI API key (should start with "sk-")');
+  storeAccount(name, {
+    auth_mode: 'apikey',
+    OPENAI_API_KEY: key,
+    tokens: null,
+    last_refresh: null,
+  });
+  const meta = store.loadMeta();
+  if (!meta.active) cmdUse([name]);
 }
 
 function cmdRemove(args) {
@@ -230,6 +256,65 @@ function cmdSync() {
   out(updated ? `synced refreshed tokens into "${updated}"` : 'nothing to sync');
 }
 
+// Set the rotation order in one go: listed accounts get priority 0..k-1,
+// unlisted accounts follow after in their current order.
+function cmdOrder(args) {
+  const accounts = store.listAccounts();
+  if (args.length === 0) {
+    if (accounts.length === 0) {
+      out('no accounts yet');
+      return;
+    }
+    accounts.forEach((a, i) => out(`${i + 1}. ${a.name}${a.active ? ' (active)' : ''}`));
+    return;
+  }
+  for (const name of args) {
+    if (!store.accountExists(name)) throw new Error(`no such account: ${name}`);
+  }
+  const dupe = args.find((n, i) => args.indexOf(n) !== i);
+  if (dupe) throw new Error(`account listed twice: ${dupe}`);
+  const meta = store.loadMeta();
+  let prio = 0;
+  for (const name of args) {
+    meta.accounts[name] = { ...(meta.accounts[name] || {}), priority: prio++ };
+  }
+  for (const a of accounts) {
+    if (args.includes(a.name)) continue;
+    meta.accounts[a.name] = { ...(meta.accounts[a.name] || {}), priority: prio++ };
+  }
+  store.saveMeta(meta);
+  out('rotation order set:');
+  store.listAccounts().forEach((a, i) => out(`${i + 1}. ${a.name}`));
+}
+
+function cmdModel(args) {
+  const meta = store.loadMeta();
+  if (args[0] == null) {
+    out(`model: ${meta.model || '(codex default)'}`);
+    return;
+  }
+  if (args[0] === 'default' || args[0] === 'clear') {
+    delete meta.model;
+    store.saveMeta(meta);
+    out('model reset to codex default');
+    return;
+  }
+  meta.model = args[0];
+  store.saveMeta(meta);
+  out(`default model set to "${meta.model}" (applied to run/exec)`);
+}
+
+// Final argv for "codex exec": inject --skip-git-repo-check so it works in
+// non-git folders, and the configured default model — unless the user
+// already passed their own flags.
+function buildExecArgs(rest, meta) {
+  const args = [...rest];
+  if (!args.includes('--skip-git-repo-check')) args.unshift('--skip-git-repo-check');
+  const hasModel = args.some((a) => a === '-m' || a === '--model' || a.startsWith('--model='));
+  if (meta.model && !hasModel) args.unshift('-m', meta.model);
+  return args;
+}
+
 async function cmdRun(args) {
   let name = null;
   let rest = args;
@@ -244,6 +329,12 @@ async function cmdRun(args) {
     name = meta.active && store.accountExists(meta.active) ? meta.active : picked.name;
   }
   if (rest[0] === '--') rest = rest.slice(1);
+  const meta = store.loadMeta();
+  if (rest[0] === 'exec') {
+    rest = ['exec', ...buildExecArgs(rest.slice(1), meta)];
+  } else if (meta.model && rest.length === 0) {
+    rest = ['-m', meta.model];
+  }
   out(`[codexswitch] running codex as "${name}"`);
   const res = await runner.runCodex(name, rest);
   return res.code;
@@ -277,7 +368,7 @@ async function cmdExec(args) {
     }
     tried.push(name);
     console.error(`[codexswitch] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}`);
-    const res = await runner.runCodex(name, ['exec', ...rest], { capture: true });
+    const res = await runner.runCodex(name, ['exec', ...buildExecArgs(rest, meta)], { capture: true });
     if (res.code === 0) {
       store.clearLimited(name);
       return 0;
@@ -333,6 +424,13 @@ async function main(argv) {
       return 0;
     case 'priority':
       return cmdPriority(args), 0;
+    case 'order':
+      return cmdOrder(args), 0;
+    case 'model':
+      return cmdModel(args), 0;
+    case 'add-key':
+    case 'apikey':
+      return cmdAddKey(args), 0;
     case 'clear-limit': {
       const name = requireArg(args, 0, 'account name');
       store.clearLimited(name);

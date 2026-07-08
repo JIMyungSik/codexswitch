@@ -131,15 +131,31 @@ function clearLimited(name) {
 }
 
 // Pick the best usable account: enabled, not currently rate-limited,
-// lowest priority number first. `exclude` skips accounts already tried.
+// lowest priority number first (the order set by "order"/"priority").
+// The active account only wins ties within the same priority, so an
+// explicit order is always respected. `exclude` skips accounts already tried.
 function pickAccount(exclude = []) {
   const now = Date.now();
   const usable = listAccounts().filter(
     (a) => !a.disabled && !exclude.includes(a.name) && (!a.limitedUntil || a.limitedUntil <= now)
   );
   if (usable.length === 0) return null;
-  const active = usable.find((a) => a.active);
-  return active || usable[0];
+  const group = usable.filter((a) => a.priority === usable[0].priority);
+  return group.find((a) => a.active) || group[0];
+}
+
+// Next usable account after the active one, following priority order and
+// wrapping around — so repeated "next" cycles through the configured order.
+function nextAccount() {
+  const all = listAccounts();
+  const now = Date.now();
+  const usable = (a) => !a.disabled && (!a.limitedUntil || a.limitedUntil <= now);
+  const start = all.findIndex((a) => a.active);
+  for (let i = 1; i <= all.length; i++) {
+    const cand = all[(start + i) % all.length];
+    if (!cand.active && usable(cand)) return cand;
+  }
+  return null;
 }
 
 module.exports = {
@@ -156,6 +172,7 @@ module.exports = {
   markLimited,
   clearLimited,
   pickAccount,
+  nextAccount,
   ensureDirs() {
     const p = paths();
     ensureDir(p.home);
