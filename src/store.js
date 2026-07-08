@@ -55,7 +55,7 @@ function accountExists(name) {
 }
 
 function readAccountAuth(name) {
-  if (!accountExists(name)) throw new Error(`no such account: ${name} (see "codexteam list")`);
+  if (!accountExists(name)) throw new Error(`no such account: ${name} (see "codexswitch list")`);
   return readJSON(accountPath(name));
 }
 

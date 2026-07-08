@@ -7,7 +7,7 @@ const { readJSONSafe, writeJSONAtomic, authInfo, ensureDir, fmtDate, fmtRemainin
 const store = require('./store.js');
 const runner = require('./runner.js');
 
-const HELP = `codexteam — multi-account manager for the OpenAI Codex CLI
+const HELP = `codexswitch — multi-account manager for the OpenAI Codex CLI
 
 Accounts
   login [name]            log in to a new account (isolated "codex login") and store it
@@ -37,7 +37,7 @@ Maintenance
 
 Environment
   CODEX_SWITCH_HOME       data dir (default ~/.codex-switch)
-  CODEX_HOME              codex config dir codexteam manages (default ~/.codex)
+  CODEX_HOME              codex config dir codexswitch manages (default ~/.codex)
   CODEX_SWITCH_CODEX_BIN  path to the codex binary (default "codex" on PATH)`;
 
 function out(msg) {
@@ -45,7 +45,7 @@ function out(msg) {
 }
 
 function requireArg(args, i, what) {
-  if (args[i] == null) throw new Error(`missing ${what} (see "codexteam help")`);
+  if (args[i] == null) throw new Error(`missing ${what} (see "codexswitch help")`);
   return args[i];
 }
 
@@ -89,7 +89,7 @@ function cmdImport(args) {
 function cmdLogin(args) {
   runner.assertCodexAvailable();
   store.ensureDirs();
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codexteam-login-'));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codexswitch-login-'));
   try {
     out('opening codex login in an isolated profile (your current account is untouched)...');
     const r = runner.spawnCodexSync(['login'], {
@@ -105,7 +105,7 @@ function cmdLogin(args) {
     if (!meta.active) {
       cmdUse([name]);
     } else {
-      out(`stored. activate it with: codexteam use ${name}`);
+      out(`stored. activate it with: codexswitch use ${name}`);
     }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -115,7 +115,7 @@ function cmdLogin(args) {
 function cmdList() {
   const accounts = store.listAccounts();
   if (accounts.length === 0) {
-    out('no accounts yet — add one with "codexteam login" or "codexteam import"');
+    out('no accounts yet — add one with "codexswitch login" or "codexswitch import"');
     return;
   }
   const now = Date.now();
@@ -157,7 +157,7 @@ function cmdCurrent() {
   }
   const info = authInfo(live);
   const match = store.listAccounts().find((a) => a.accountId === info.accountId);
-  const name = match ? match.name : '(not stored — run "codexteam import")';
+  const name = match ? match.name : '(not stored — run "codexswitch import")';
   const note = meta.active && match && meta.active !== match.name ? ` (meta says "${meta.active}" — out of sync)` : '';
   out(`active: ${name}${note}`);
   out(`  email: ${info.email || '-'}\n  plan:  ${info.plan || '-'}\n  token refreshed: ${fmtDate(info.lastRefresh)}`);
@@ -240,11 +240,11 @@ async function cmdRun(args) {
   if (!name) {
     const meta = store.loadMeta();
     const picked = store.pickAccount();
-    if (!picked) throw new Error('no usable account — add one with "codexteam login"');
+    if (!picked) throw new Error('no usable account — add one with "codexswitch login"');
     name = meta.active && store.accountExists(meta.active) ? meta.active : picked.name;
   }
   if (rest[0] === '--') rest = rest.slice(1);
-  out(`[codexteam] running codex as "${name}"`);
+  out(`[codexswitch] running codex as "${name}"`);
   const res = await runner.runCodex(name, rest);
   return res.code;
 }
@@ -263,7 +263,7 @@ async function cmdExec(args) {
 
   const meta = store.loadMeta();
   const total = store.listAccounts().length;
-  if (total === 0) throw new Error('no accounts — add one with "codexteam login"');
+  if (total === 0) throw new Error('no accounts — add one with "codexswitch login"');
 
   const tried = [];
   for (let attempt = 0; attempt < total; attempt++) {
@@ -276,7 +276,7 @@ async function cmdExec(args) {
       name = picked.name;
     }
     tried.push(name);
-    console.error(`[codexteam] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}`);
+    console.error(`[codexswitch] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}`);
     const res = await runner.runCodex(name, ['exec', ...rest], { capture: true });
     if (res.code === 0) {
       store.clearLimited(name);
@@ -285,12 +285,12 @@ async function cmdExec(args) {
     if (runner.looksRateLimited(res.output)) {
       const until = Date.now() + runner.limitCooldownMs(res.output, meta.cooldownMinutes);
       store.markLimited(name, until);
-      console.error(`[codexteam] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating`);
+      console.error(`[codexswitch] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating`);
       continue;
     }
     return res.code; // real failure, don't burn other accounts on it
   }
-  console.error('[codexteam] all accounts are rate-limited or disabled');
+  console.error('[codexswitch] all accounts are rate-limited or disabled');
   return 2;
 }
 
@@ -348,7 +348,7 @@ async function main(argv) {
     case 'exec':
       return cmdExec(args);
     default:
-      throw new Error(`unknown command "${cmd}" (see "codexteam help")`);
+      throw new Error(`unknown command "${cmd}" (see "codexswitch help")`);
   }
 }
 
