@@ -131,7 +131,7 @@ cxs exec "write tests for this project"
 While running `codex exec`, if the account **hits a usage limit**:
 
 1. The account is marked "limited" for a while (times like "try again in 2 hours" in the error message are parsed automatically)
-2. The same command is **retried automatically on the next usable account**
+2. The next usable account **resumes the same session** (`codex exec resume`) and continues from where it stopped — no restarting from scratch (opt out with `--no-resume`)
 3. It only stops when every account is exhausted
 
 ```
@@ -183,6 +183,19 @@ cxs add-key api-account sk-your-api-key
 > Tip: to keep the key out of your shell history, omit it and pass it via the environment:
 > `OPENAI_API_KEY=sk-... cxs add-key api-account`
 
+### 3-9. Usage thresholds (rotate before hitting the wall)
+
+Accounts whose recorded 5-hour/weekly usage reaches the configured percentage are skipped in rotation automatically (default 95%):
+
+```bash
+cxs threshold 90        # both 5h and weekly at 90%
+cxs threshold 90 98     # 5h at 90%, weekly at 98%
+cxs threshold           # show current settings
+cxs list                # per-account 5h/week usage columns
+```
+
+> Usage numbers are read from what codex records in its session files. Some codex versions do not record them in `exec` mode; in that case they refresh after interactive runs (`cxs run`). Without numbers, rotation still works via limit-error detection.
+
 ---
 
 ## 4. All commands
@@ -197,10 +210,15 @@ cxs add-key api-account sk-your-api-key
 | `cxs current` | Show the active account |
 | `cxs next` | Switch to the next account in rotation order (wraps around) |
 | `cxs run [name] [args...]` | Run codex as a specific account without switching (isolated env) |
-| `cxs exec [args...]` | `codex exec` + automatic rotation through the order on usage limits; works outside git repos (`--skip-git-repo-check` added automatically) |
-| `cxs exec -a <name> ...` | Start exec with a specific account |
+| `cxs exec [args...]` | `codex exec` + automatic rotation on usage limits — the next account resumes the same session; works outside git repos |
+| `cxs exec -a <name> ...` | Start exec with a specific account (`--no-resume`: restart instead of resuming) |
 | `cxs order [names...]` | Set the rotation order in one command (no args: show it) |
 | `cxs model [name]` | Set the default model injected into `run`/`exec` (`default` to reset) |
+| `cxs threshold [5h%] [wk%]` | Rotate to the next account when usage reaches these percents (default 95; one value sets both) |
+| `cxs patterns [add/remove]` | Custom regex patterns treated as rate-limit errors |
+| `cxs export <file>` | Back up all accounts + settings (⚠️ contains tokens — treat like a password) |
+| `cxs restore <file>` | Restore accounts from a backup (for moving machines) |
+| `cxs completion <bash\|zsh>` | Print a shell completion script |
 | `cxs remove <name>` | Delete an account |
 | `cxs rename <old> <new>` | Rename an account |
 | `cxs disable / enable <name>` | Temporarily exclude from / restore to rotation |

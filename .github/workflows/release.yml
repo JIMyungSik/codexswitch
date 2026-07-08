@@ -1,0 +1,28 @@
+# Publishes to npm when a v* tag is pushed, using npm Trusted Publishing
+# (OIDC) — no NPM_TOKEN secret needed. One-time setup on npmjs.com:
+#   package @carjms/codexswitch -> Settings -> Publishing access ->
+#   Trusted Publisher: GitHub Actions, repository JIMyungSik/codexswitch,
+#   workflow file release.yml
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm test
+      # trusted publishing requires npm >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: npm publish

@@ -1,20 +1,21 @@
 'use strict';
 
-// Zero-dependency smoke test: exercises import/list/use/rotation against a
-// fake codex binary in fully isolated temp directories. Never touches the
-// real ~/.codex or ~/.codex-switch.
+// Zero-dependency smoke test: exercises the full flow against a fake codex
+// binary in fully isolated temp directories. Never touches the real
+// ~/.codex or ~/.codex-switch.
 
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 const root = path.join(os.tmpdir(), `codex-switch-test-${process.pid}`);
 const switchHome = path.join(root, 'switch');
 const codexHome = path.join(root, 'codex');
 const binDir = path.join(root, 'bin');
 const cli = path.join(__dirname, '..', 'bin', 'codex-switch.js');
+const isWin = process.platform === 'win32';
 
 fs.rmSync(root, { recursive: true, force: true });
 for (const d of [switchHome, codexHome, binDir]) fs.mkdirSync(d, { recursive: true });
@@ -36,24 +37,45 @@ function fakeAuth(email, accountId, plan = 'plus', lastRefresh = '2026-01-01T00:
   };
 }
 
-// Fake codex: `--version` ok; `exec` fails with a usage-limit message for
-// account acc-a, succeeds for anyone else, and asserts the overlay works.
-const fakeCodex = path.join(binDir, 'codex');
+// Fake codex behavior:
+//  --version        -> ok
+//  exec [...]       -> requires --skip-git-repo-check and an overlaid
+//                      config.toml; writes a session rollout like real codex
+//                      (rate_limits from FAKE_USED_PCT / FAKE_USED_PCT_WEEK);
+//                      acc-a fails with a usage-limit unless FAKE_A_OK=1
+//                      (or a custom message when FAKE_CUSTOM=1);
+//                      prints EXEC_OK / RESUME_OK <id> model=<m>
+const fakeCodexJs = path.join(binDir, 'fake-codex.js');
 fs.writeFileSync(
-  fakeCodex,
-  `#!/usr/bin/env node
-const fs = require('fs'), path = require('path');
+  fakeCodexJs,
+  `const fs = require('fs'), path = require('path');
 const cmd = process.argv[2];
 if (cmd === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
 if (cmd === 'exec') {
   const home = process.env.CODEX_HOME;
   if (!fs.existsSync(path.join(home, 'config.toml'))) { console.error('overlay missing config.toml'); process.exit(3); }
   if (!process.argv.includes('--skip-git-repo-check')) { console.error('missing --skip-git-repo-check'); process.exit(4); }
+  const isResume = process.argv[3] === 'resume';
   const mi = process.argv.indexOf('-m');
   const model = mi > -1 ? process.argv[mi + 1] : 'none';
   const auth = JSON.parse(fs.readFileSync(path.join(home, 'auth.json'), 'utf8'));
   const id = auth.tokens ? auth.tokens.account_id : 'apikey:' + auth.OPENAI_API_KEY.slice(0, 8);
-  if (id === 'acc-a') {
+
+  // write a session rollout, like real codex does
+  const day = path.join(home, 'sessions', '2026', '07', '09');
+  fs.mkdirSync(day, { recursive: true });
+  const pct = process.env.FAKE_USED_PCT ? Number(process.env.FAKE_USED_PCT) : null;
+  const rl = pct == null ? null : {
+    primary: { used_percent: pct, window_minutes: 300, resets_in_seconds: 1800 },
+    secondary: { used_percent: Number(process.env.FAKE_USED_PCT_WEEK || 10), window_minutes: 10080, resets_in_seconds: 600000 },
+  };
+  fs.writeFileSync(
+    path.join(day, 'rollout-' + Date.now() + '-' + Math.random().toString(36).slice(2) + '.jsonl'),
+    JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'token_count', rate_limits: rl } }) + '\\n'
+  );
+
+  if (id === 'acc-a' && process.env.FAKE_CUSTOM === '1') { console.error('MY_CUSTOM_LIMIT reached, come back later'); process.exit(1); }
+  if (id === 'acc-a' && process.env.FAKE_A_OK !== '1') {
     console.error("You've hit your usage limit. Try again in 2 hours.");
     process.exit(1);
   }
@@ -61,15 +83,25 @@ if (cmd === 'exec') {
     auth.last_refresh = '2026-02-02T00:00:00Z'; // simulate a token refresh
     fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(auth));
   }
-  console.log('EXEC_OK ' + id + ' model=' + model);
+  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model);
   process.exit(0);
 }
 process.exit(0);
-`,
-  { mode: 0o755 }
+`
 );
 
-const env = {
+// Platform wrapper: shebang script on POSIX, .cmd shim on Windows (this also
+// exercises the .cmd shell-spawn path in runner.js on Windows CI).
+let fakeCodex;
+if (isWin) {
+  fakeCodex = path.join(binDir, 'codex.cmd');
+  fs.writeFileSync(fakeCodex, `@echo off\r\nnode "${fakeCodexJs}" %*\r\n`);
+} else {
+  fakeCodex = path.join(binDir, 'codex');
+  fs.writeFileSync(fakeCodex, `#!/usr/bin/env node\n${fs.readFileSync(fakeCodexJs, 'utf8')}`, { mode: 0o755 });
+}
+
+const baseEnv = {
   ...process.env,
   CODEX_SWITCH_HOME: switchHome,
   CODEX_HOME: codexHome,
@@ -77,12 +109,15 @@ const env = {
 };
 
 function run(args, opts = {}) {
-  try {
-    return { code: 0, out: execFileSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
-  } catch (e) {
-    if (opts.allowFail) return { code: e.status, out: `${e.stdout || ''}${e.stderr || ''}` };
-    throw new Error(`codex-switch ${args.join(' ')} failed (${e.status}):\n${e.stdout}\n${e.stderr}`);
+  const r = spawnSync(process.execPath, [cli, ...args], {
+    env: { ...baseEnv, ...(opts.env || {}) },
+    encoding: 'utf8',
+  });
+  const res = { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+  if (res.code !== 0 && !opts.allowFail) {
+    throw new Error(`codex-switch ${args.join(' ')} failed (${res.code}):\n${res.out}`);
   }
+  return res;
 }
 
 // --- import two accounts ---
@@ -114,12 +149,13 @@ run(['use', 'work-b']);
 const storedA = JSON.parse(fs.readFileSync(path.join(switchHome, 'accounts', 'a@test.com.json'), 'utf8'));
 assert.strictEqual(storedA.last_refresh, '2026-03-03T00:00:00Z');
 
-// --- exec rotation: acc-a hits the limit, rotation lands on acc-b ---
+// --- exec rotation: acc-a hits the limit, next account RESUMES the session ---
 run(['use', 'a@test.com']);
 run(['priority', 'a@test.com', '0']);
 run(['priority', 'work-b', '1']);
 r = run(['exec', 'do the thing']);
-assert.match(r.out, /EXEC_OK acc-b/);
+assert.match(r.out, /RESUME_OK acc-b model=none/);
+assert.match(r.out, /resuming the session/);
 
 // acc-a must now be marked limited (~2h from the error message)
 const meta = JSON.parse(fs.readFileSync(path.join(switchHome, 'meta.json'), 'utf8'));
@@ -151,7 +187,54 @@ assert.ok(!/rotating/.test(r.out), 'should start with work-b per order, no rotat
 r = run(['exec', '-m', 'gpt-user-2', 'hello']);
 assert.match(r.out, /model=gpt-user-2/);
 
-// --- add-key: API-key account works and can be used in exec ---
+// --- --no-resume: rotation restarts the prompt instead of resuming ---
+run(['order', 'a@test.com', 'work-b']); // a first, a always limit-fails
+run(['clear-limit', 'a@test.com']);
+r = run(['exec', '--no-resume', 'restart me']);
+assert.match(r.out, /EXEC_OK acc-b/);
+assert.ok(!/RESUME_OK/.test(r.out), '--no-resume must not resume');
+
+// --- threshold: usage above the threshold rotates the account out ---
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+run(['threshold', '90']);
+r = run(['threshold']);
+assert.match(r.out, /5h 90% \/ weekly 90%/);
+run(['order', 'work-b', 'a@test.com']); // b first
+r = run(['exec', 'use quota'], { env: { FAKE_USED_PCT: '97' } }); // b reports 97% of 5h
+assert.match(r.out, /EXEC_OK acc-b/);
+assert.match(r.out, /97% of its 5h limit/);
+r = run(['list']);
+assert.match(r.out, /over-5h/);
+assert.match(r.out, /97%/);
+// next exec must skip work-b (over threshold) and use a@test.com
+r = run(['exec', 'next task', 'hi'], { env: { FAKE_A_OK: '1' } });
+assert.match(r.out, /EXEC_OK acc-a/);
+
+// --- custom limit patterns ---
+run(['patterns', 'add', 'MY_CUSTOM_LIMIT']);
+r = run(['patterns']);
+assert.match(r.out, /custom 1: MY_CUSTOM_LIMIT/);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+r = run(['exec', '-a', 'a@test.com', 'x'], { env: { FAKE_CUSTOM: '1' } });
+assert.match(r.out, /RESUME_OK acc-b/); // custom message detected -> rotated
+run(['patterns', 'remove', '1']);
+r = run(['patterns']);
+assert.match(r.out, /custom: \(none\)/);
+
+// --- export / restore ---
+const backup = path.join(root, 'backup.json');
+run(['export', backup]);
+assert.ok(fs.existsSync(backup));
+run(['remove', 'a@test.com']);
+r = run(['list']);
+assert.ok(!/a@test\.com/.test(r.out));
+run(['restore', backup]);
+r = run(['list']);
+assert.match(r.out, /a@test\.com/);
+
+// --- api-key account works and can be used in exec ---
 run(['add-key', 'api-acct', 'sk-test-1234567890']);
 r = run(['list']);
 assert.match(r.out, /api-acct/);
@@ -161,17 +244,24 @@ assert.match(r.out, /EXEC_OK apikey:sk-test-/);
 
 // --- next wraps around the order ---
 run(['remove', 'api-acct']);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
 run(['use', 'work-b']); // order: work-b(0), a(1); active=b
 r = run(['next']);
 assert.match(r.out, /now using "a@test\.com"/);
 r = run(['next']); // wraps back
 assert.match(r.out, /now using "work-b"/);
 
+// --- completion script mentions our commands ---
+r = run(['completion', 'bash']);
+assert.match(r.out, /complete -F _codexswitch codexswitch cxs/);
+
 // --- disable everything -> exec must fail cleanly ---
+run(['disable', 'a@test.com']);
 run(['disable', 'work-b']);
 r = run(['exec', 'x'], { allowFail: true });
 assert.strictEqual(r.code, 2);
-assert.match(r.out, /all accounts are rate-limited or disabled/);
+assert.match(r.out, /all accounts are rate-limited, over threshold, or disabled/);
 
 // --- remove ---
 run(['enable', 'work-b']);

@@ -29,16 +29,23 @@ Running codex
   run [name] [args...]    run codex as <name> (or active account) in an isolated
                           per-account CODEX_HOME; config/sessions are shared
   exec [args...]          run "codex exec ..." and auto-rotate through accounts in
-                          rotation order when a usage/rate limit is hit
-                          (--skip-git-repo-check is added automatically)
+                          rotation order on usage limits; the next account resumes
+                          the same session (--skip-git-repo-check added automatically)
       -a, --account <n>   start exec with a specific account
+      --no-resume         restart the prompt instead of resuming on rotation
 
 Settings
   model [name|default]    show/set the default model injected into run/exec
+  threshold [5h%] [wk%]   rotate early when recorded usage reaches these percents
+                          of the 5-hour / weekly window (default 95, one value = both)
   cooldown [minutes]      show/set rate-limit cooldown (default 60)
+  patterns [add|remove]   extra regex patterns treated as rate-limit errors
 
 Maintenance
   sync                    save tokens refreshed by codex back into the store
+  export <file>           back up all accounts + settings (contains tokens!)
+  restore <file>          restore accounts from a backup file
+  completion <bash|zsh>   print a shell completion script
   help                    show this help
 
 Environment
@@ -125,16 +132,31 @@ function cmdList() {
     return;
   }
   const now = Date.now();
-  const rows = accounts.map((a) => [
-    a.active ? '*' : '',
-    a.name,
-    a.email,
-    a.plan,
-    a.priority,
-    a.disabled ? 'disabled' : a.limitedUntil && a.limitedUntil > now ? `limited ${fmtRemaining(a.limitedUntil)}` : 'ok',
-    fmtDate(a.lastRefresh),
-  ]);
-  out(table(rows, ['', 'name', 'email', 'plan', 'prio', 'status', 'token refreshed']));
+  const meta = store.loadMeta();
+  const pct = (win) => (win && typeof win.pct === 'number' ? `${Math.round(win.pct)}%` : '-');
+  const rows = accounts.map((a) => {
+    const over = store.overThreshold(a, meta, now);
+    const status = a.disabled
+      ? 'disabled'
+      : a.limitedUntil && a.limitedUntil > now
+        ? `limited ${fmtRemaining(a.limitedUntil)}`
+        : over
+          ? `over-${over}`
+          : 'ok';
+    return [
+      a.active ? '*' : '',
+      a.name,
+      a.email,
+      a.plan,
+      a.priority,
+      status,
+      pct(a.usage && a.usage.p5h),
+      pct(a.usage && a.usage.weekly),
+      fmtDate(a.lastRefresh),
+    ];
+  });
+  out(table(rows, ['', 'name', 'email', 'plan', 'prio', 'status', '5h', 'week', 'token refreshed']));
+  out(`(rotate threshold: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}% — change with "codexswitch threshold")`);
 }
 
 function cmdUse(args) {
@@ -304,6 +326,110 @@ function cmdModel(args) {
   out(`default model set to "${meta.model}" (applied to run/exec)`);
 }
 
+// Rotate-early thresholds: how full the 5h / weekly window may get before
+// the account is skipped in rotation.
+function cmdThreshold(args) {
+  const meta = store.loadMeta();
+  if (args.length === 0) {
+    out(`threshold: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`);
+    out('usage: codexswitch threshold <5h%> [weekly%]   (one value sets both)');
+    return;
+  }
+  const parse = (s) => {
+    const n = parseInt(s, 10);
+    if (Number.isNaN(n) || n < 1 || n > 100) throw new Error(`threshold must be 1-100, got "${s}"`);
+    return n;
+  };
+  meta.threshold5h = parse(args[0]);
+  meta.thresholdWeekly = args[1] != null ? parse(args[1]) : meta.threshold5h;
+  store.saveMeta(meta);
+  out(`threshold set: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`);
+}
+
+function cmdPatterns(args) {
+  const meta = store.loadMeta();
+  const [sub, ...rest] = args;
+  if (!sub) {
+    out('built-in: usage limit / rate limit / too many requests / quota exceeded / 429');
+    if (meta.limitPatterns.length === 0) out('custom: (none)');
+    else meta.limitPatterns.forEach((p, i) => out(`custom ${i + 1}: ${p}`));
+    return;
+  }
+  if (sub === 'add') {
+    const pattern = rest.join(' ');
+    if (!pattern) throw new Error('usage: codexswitch patterns add <regex>');
+    new RegExp(pattern, 'i'); // validate — throws on bad regex
+    meta.limitPatterns.push(pattern);
+    store.saveMeta(meta);
+    out(`added pattern: ${pattern}`);
+    return;
+  }
+  if (sub === 'remove') {
+    const key = rest.join(' ');
+    const idx = /^\d+$/.test(key) ? parseInt(key, 10) - 1 : meta.limitPatterns.indexOf(key);
+    if (idx < 0 || idx >= meta.limitPatterns.length) throw new Error(`no such pattern: ${key}`);
+    const [removed] = meta.limitPatterns.splice(idx, 1);
+    store.saveMeta(meta);
+    out(`removed pattern: ${removed}`);
+    return;
+  }
+  throw new Error('usage: codexswitch patterns [add <regex> | remove <n|regex>]');
+}
+
+function cmdExport(args) {
+  const file = requireArg(args, 0, 'output file path');
+  const accounts = {};
+  for (const a of store.listAccounts()) accounts[a.name] = store.readAccountAuth(a.name);
+  if (Object.keys(accounts).length === 0) throw new Error('no accounts to export');
+  writeJSONAtomic(path.resolve(file), { version: 1, exportedAt: new Date().toISOString(), meta: store.loadMeta(), accounts }, 0o600);
+  out(`exported ${Object.keys(accounts).length} account(s) to ${file}`);
+  out('WARNING: this file contains login tokens — treat it like a password.');
+}
+
+function cmdRestore(args) {
+  const file = requireArg(args, 0, 'backup file path');
+  const data = readJSONSafe(path.resolve(file));
+  if (!data || data.version !== 1 || !data.accounts) throw new Error('not a codexswitch backup file');
+  store.ensureDirs();
+  const meta = store.loadMeta();
+  let n = 0;
+  for (const [name, auth] of Object.entries(data.accounts)) {
+    store.writeAccountAuth(name, auth);
+    const backup = (data.meta && data.meta.accounts && data.meta.accounts[name]) || {};
+    meta.accounts[name] = { ...backup, ...(meta.accounts[name] || {}) };
+    n++;
+  }
+  if (!meta.active && data.meta && data.meta.active) meta.active = data.meta.active;
+  store.saveMeta(meta);
+  out(`restored ${n} account(s) from ${file}`);
+}
+
+function cmdNames() {
+  for (const a of store.listAccounts()) out(a.name);
+}
+
+const COMMANDS =
+  'login import add-key list use current next run exec order model remove rename ' +
+  'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
+
+function cmdCompletion(args) {
+  const shell = args[0];
+  if (shell !== 'bash' && shell !== 'zsh') {
+    throw new Error('usage: codexswitch completion <bash|zsh>  (append the output to your shell rc file)');
+  }
+  const script = `# codexswitch completion (${shell})
+${shell === 'zsh' ? 'autoload -Uz bashcompinit && bashcompinit\n' : ''}_codexswitch() {
+  local cur="\${COMP_WORDS[COMP_CWORD]}"
+  if [ "\$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( \$(compgen -W "${COMMANDS}" -- "\$cur") )
+  else
+    COMPREPLY=( \$(compgen -W "\$(codexswitch names 2>/dev/null)" -- "\$cur") )
+  fi
+}
+complete -F _codexswitch codexswitch cxs`;
+  out(script);
+}
+
 // Final argv for "codex exec": inject --skip-git-repo-check so it works in
 // non-git folders, and the configured default model — unless the user
 // already passed their own flags.
@@ -336,27 +462,36 @@ async function cmdRun(args) {
     rest = ['-m', meta.model];
   }
   out(`[codexswitch] running codex as "${name}"`);
+  const startTs = Date.now();
   const res = await runner.runCodex(name, rest);
+  runner.recordUsage(name, res.profile, startTs);
   return res.code;
 }
 
+const RESUME_PROMPT = 'Continue the previous task from exactly where it left off.';
+
 async function cmdExec(args) {
   let explicit = null;
+  let allowResume = true;
   const rest = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-a' || args[i] === '--account') {
       explicit = requireArg(args, ++i, 'account name after --account');
+    } else if (args[i] === '--no-resume') {
+      allowResume = false;
     } else {
       rest.push(args[i]);
     }
   }
   if (explicit && !store.accountExists(explicit)) throw new Error(`no such account: ${explicit}`);
+  if (rest[0] === 'resume') allowResume = false; // user drives resume themselves
 
   const meta = store.loadMeta();
   const total = store.listAccounts().length;
   if (total === 0) throw new Error('no accounts — add one with "codexswitch login"');
 
   const tried = [];
+  let useResume = false;
   for (let attempt = 0; attempt < total; attempt++) {
     let name;
     if (explicit && attempt === 0) {
@@ -367,22 +502,50 @@ async function cmdExec(args) {
       name = picked.name;
     }
     tried.push(name);
-    console.error(`[codexswitch] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}`);
-    const res = await runner.runCodex(name, ['exec', ...buildExecArgs(rest, meta)], { capture: true });
+    console.error(
+      `[codexswitch] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1}${useResume ? ', resuming session' : ''})` : ''}`
+    );
+    // On rotation, continue the same session with the next account instead
+    // of restarting the whole prompt — the session files are shared.
+    const codexArgs = useResume
+      ? ['exec', 'resume', '--last', ...buildExecArgs([], meta), RESUME_PROMPT]
+      : ['exec', ...buildExecArgs(rest, meta)];
+    const startTs = Date.now();
+    const res = await runner.runCodex(name, codexArgs, { capture: true });
+    runner.recordUsage(name, res.profile, startTs);
     if (res.code === 0) {
       store.clearLimited(name);
+      warnIfOverThreshold(name);
       return 0;
     }
-    if (runner.looksRateLimited(res.output)) {
+    if (runner.looksRateLimited(res.output, meta.limitPatterns)) {
       const until = Date.now() + runner.limitCooldownMs(res.output, meta.cooldownMinutes);
       store.markLimited(name, until);
-      console.error(`[codexswitch] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating`);
+      if (allowResume && !useResume && runner.sessionTouchedSince(res.profile, startTs)) {
+        useResume = true;
+      }
+      console.error(
+        `[codexswitch] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating${useResume ? ' and resuming the session' : ''}`
+      );
       continue;
     }
     return res.code; // real failure, don't burn other accounts on it
   }
-  console.error('[codexswitch] all accounts are rate-limited or disabled');
+  console.error('[codexswitch] all accounts are rate-limited, over threshold, or disabled');
   return 2;
+}
+
+function warnIfOverThreshold(name) {
+  const meta = store.loadMeta();
+  const account = store.listAccounts().find((a) => a.name === name);
+  if (!account) return;
+  const blocked = store.overThreshold(account, meta);
+  if (blocked) {
+    const pct = blocked === '5h' ? account.usage.p5h.pct : account.usage.weekly.pct;
+    console.error(
+      `[codexswitch] "${name}" is at ${Math.round(pct)}% of its ${blocked} limit (threshold ${blocked === '5h' ? meta.threshold5h : meta.thresholdWeekly}%) — the next exec will rotate to another account`
+    );
+  }
 }
 
 async function main(argv) {
@@ -431,10 +594,22 @@ async function main(argv) {
     case 'add-key':
     case 'apikey':
       return cmdAddKey(args), 0;
+    case 'threshold':
+      return cmdThreshold(args), 0;
+    case 'patterns':
+      return cmdPatterns(args), 0;
+    case 'export':
+      return cmdExport(args), 0;
+    case 'restore':
+      return cmdRestore(args), 0;
+    case 'names':
+      return cmdNames(), 0;
+    case 'completion':
+      return cmdCompletion(args), 0;
     case 'clear-limit': {
       const name = requireArg(args, 0, 'account name');
-      store.clearLimited(name);
-      out(`cleared rate-limit record for "${name}"`);
+      store.clearLimited(name, { includeUsage: true });
+      out(`cleared rate-limit and usage records for "${name}"`);
       return 0;
     }
     case 'cooldown':

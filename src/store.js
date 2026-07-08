@@ -30,6 +30,9 @@ function loadMeta() {
   if (!meta.accounts) meta.accounts = {};
   if (!('active' in meta)) meta.active = null;
   if (!meta.cooldownMinutes) meta.cooldownMinutes = 60;
+  if (!meta.threshold5h) meta.threshold5h = 95;
+  if (!meta.thresholdWeekly) meta.thresholdWeekly = 95;
+  if (!Array.isArray(meta.limitPatterns)) meta.limitPatterns = [];
   return meta;
 }
 
@@ -83,6 +86,7 @@ function listAccounts() {
         priority: m.priority ?? 0,
         disabled: !!m.disabled,
         limitedUntil: m.limitedUntil || null,
+        usage: m.usage || null,
         active: meta.active === name,
       };
     })
@@ -122,12 +126,51 @@ function markLimited(name, untilTs) {
   saveMeta(meta);
 }
 
-function clearLimited(name) {
+function clearLimited(name, { includeUsage = false } = {}) {
   const meta = loadMeta();
-  if (meta.accounts[name] && meta.accounts[name].limitedUntil) {
-    delete meta.accounts[name].limitedUntil;
+  const m = meta.accounts[name];
+  if (m && (m.limitedUntil || (includeUsage && m.usage))) {
+    delete m.limitedUntil;
+    if (includeUsage) delete m.usage;
     saveMeta(meta);
   }
+}
+
+function saveUsage(name, usage) {
+  const meta = loadMeta();
+  if (!meta.accounts[name]) meta.accounts[name] = {};
+  meta.accounts[name].usage = usage;
+  saveMeta(meta);
+}
+
+// An account is "over threshold" when its last recorded 5h/weekly usage
+// exceeds the configured percentage and the window has not reset yet.
+// Returns the blocking window ('5h' | 'weekly') or null.
+function overThreshold(account, meta, now = Date.now()) {
+  const u = account.usage;
+  if (!u) return null;
+  const checks = [
+    ['5h', u.p5h, meta.threshold5h],
+    ['weekly', u.weekly, meta.thresholdWeekly],
+  ];
+  for (const [label, win, threshold] of checks) {
+    if (!win || typeof win.pct !== 'number') continue;
+    if (win.pct < threshold) continue;
+    // Trust the snapshot only while its window can still be in effect.
+    if (win.resetAt) {
+      if (win.resetAt > now) return label;
+    } else if (win.windowMinutes && u.at + win.windowMinutes * 60000 > now) {
+      return label;
+    }
+  }
+  return null;
+}
+
+function isUsable(account, meta, now = Date.now()) {
+  if (account.disabled) return false;
+  if (account.limitedUntil && account.limitedUntil > now) return false;
+  if (overThreshold(account, meta, now)) return false;
+  return true;
 }
 
 // Pick the best usable account: enabled, not currently rate-limited,
@@ -136,9 +179,8 @@ function clearLimited(name) {
 // explicit order is always respected. `exclude` skips accounts already tried.
 function pickAccount(exclude = []) {
   const now = Date.now();
-  const usable = listAccounts().filter(
-    (a) => !a.disabled && !exclude.includes(a.name) && (!a.limitedUntil || a.limitedUntil <= now)
-  );
+  const meta = loadMeta();
+  const usable = listAccounts().filter((a) => !exclude.includes(a.name) && isUsable(a, meta, now));
   if (usable.length === 0) return null;
   const group = usable.filter((a) => a.priority === usable[0].priority);
   return group.find((a) => a.active) || group[0];
@@ -149,11 +191,11 @@ function pickAccount(exclude = []) {
 function nextAccount() {
   const all = listAccounts();
   const now = Date.now();
-  const usable = (a) => !a.disabled && (!a.limitedUntil || a.limitedUntil <= now);
+  const meta = loadMeta();
   const start = all.findIndex((a) => a.active);
   for (let i = 1; i <= all.length; i++) {
     const cand = all[(start + i) % all.length];
-    if (!cand.active && usable(cand)) return cand;
+    if (!cand.active && isUsable(cand, meta, now)) return cand;
   }
   return null;
 }
@@ -171,6 +213,9 @@ module.exports = {
   syncBackFrom,
   markLimited,
   clearLimited,
+  saveUsage,
+  overThreshold,
+  isUsable,
   pickAccount,
   nextAccount,
   ensureDirs() {

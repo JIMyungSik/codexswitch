@@ -65,6 +65,10 @@ function buildProfile(name) {
   const profile = path.join(p.profilesDir, name);
   ensureDir(profile);
 
+  // Sessions must exist in the real CODEX_HOME before linking, so that every
+  // profile shares them — resume-on-rotation and usage tracking depend on it.
+  ensureDir(path.join(p.codexHome, 'sessions'), 0o755);
+
   let entries = [];
   try {
     entries = fs.readdirSync(p.codexHome);
@@ -184,7 +188,7 @@ function runCodex(name, args, { capture = false } = {}) {
       collect(child.stdout, process.stdout);
       collect(child.stderr, process.stderr);
     }
-    child.on('error', (err) => resolve({ code: 1, output: out, error: err }));
+    child.on('error', (err) => resolve({ code: 1, output: out, error: err, profile }));
     child.on('close', (code) => {
       // codex may have refreshed the token while running — persist it.
       try {
@@ -192,16 +196,106 @@ function runCodex(name, args, { capture = false } = {}) {
       } catch {
         /* best effort */
       }
-      resolve({ code: code == null ? 1 : code, output: out });
+      resolve({ code: code == null ? 1 : code, output: out, profile });
     });
   });
 }
 
-const LIMIT_RE =
-  /usage limit|rate limit|too many requests|quota (?:exceeded|reached)|\b429\b|hit your (?:usage|weekly|5h) limit/i;
+// ---- usage tracking ---------------------------------------------------
+// Codex writes token_count events into session rollout files; when the
+// backend sends x-codex-* headers they include rate_limits with the 5h
+// (primary) and weekly (secondary) used_percent and reset times. Some
+// exec-mode versions report null there, so all parsing is best-effort.
 
-function looksRateLimited(output) {
-  return LIMIT_RE.test(output || '');
+function listRolloutsSince(sessionsDir, sinceMs) {
+  const found = [];
+  const walk = (dir, depth) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 4) walk(full, depth + 1);
+      else if (e.isFile() && /^rollout-.*\.jsonl$/.test(e.name)) {
+        try {
+          const st = fs.statSync(full);
+          if (st.mtimeMs >= sinceMs) found.push({ full, mtime: st.mtimeMs });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  };
+  walk(sessionsDir, 0);
+  return found.sort((a, b) => a.mtime - b.mtime);
+}
+
+function windowUsage(win, eventTs) {
+  if (!win || typeof win.used_percent !== 'number') return null;
+  const usage = { pct: win.used_percent, resetAt: null, windowMinutes: win.window_minutes || null };
+  if (typeof win.resets_in_seconds === 'number') usage.resetAt = eventTs + win.resets_in_seconds * 1000;
+  else if (typeof win.resets_at === 'number') usage.resetAt = win.resets_at * 1000;
+  return usage;
+}
+
+// Scan rollouts touched since `sinceMs` for the newest non-null rate_limits
+// snapshot. Returns { p5h, weekly, at } or null when codex reported nothing.
+function scanUsage(sessionsDir, sinceMs) {
+  let result = null;
+  for (const f of listRolloutsSince(sessionsDir, sinceMs)) {
+    let text;
+    try {
+      text = fs.readFileSync(f.full, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      if (!line.includes('rate_limits')) continue;
+      try {
+        const obj = JSON.parse(line);
+        const rl = (obj.payload && obj.payload.rate_limits) || obj.rate_limits;
+        if (!rl) continue;
+        const eventTs = obj.timestamp ? Date.parse(obj.timestamp) || Date.now() : Date.now();
+        const p5h = windowUsage(rl.primary, eventTs);
+        const weekly = windowUsage(rl.secondary, eventTs);
+        if (p5h || weekly) result = { p5h, weekly, at: eventTs };
+      } catch {
+        /* malformed line */
+      }
+    }
+  }
+  return result;
+}
+
+// After running codex for an account, persist the freshest usage snapshot.
+function recordUsage(name, profile, sinceMs) {
+  const usage = scanUsage(path.join(profile, 'sessions'), sinceMs);
+  if (usage) store.saveUsage(name, usage);
+  return usage;
+}
+
+// Was a session rollout created/updated during this run? (drives whether a
+// rotated retry can "exec resume" instead of restarting from scratch)
+function sessionTouchedSince(profile, sinceMs) {
+  return listRolloutsSince(path.join(profile, 'sessions'), sinceMs).length > 0;
+}
+
+const LIMIT_RE =
+  /usage[ _]limit|rate[ _]limit|too many requests|quota (?:exceeded|reached)|\b429\b|hit your (?:usage|weekly|5h) limit/i;
+
+function looksRateLimited(output, extraPatterns = []) {
+  if (LIMIT_RE.test(output || '')) return true;
+  for (const p of extraPatterns) {
+    try {
+      if (new RegExp(p, 'i').test(output || '')) return true;
+    } catch {
+      /* invalid user pattern — ignore */
+    }
+  }
+  return false;
 }
 
 // Try to extract "try again in 2 hours 30 minutes" style hints; fall back
@@ -220,4 +314,7 @@ module.exports = {
   runCodex,
   looksRateLimited,
   limitCooldownMs,
+  scanUsage,
+  recordUsage,
+  sessionTouchedSince,
 };
