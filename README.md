@@ -187,6 +187,9 @@ npm 전역 설치 경로가 PATH에 없는 경우입니다. 터미널/PowerShell
 **Q. `codex CLI not found` 오류가 나요.**
 Codex CLI가 설치되지 않았거나 PATH에 없는 경우입니다. `npm install -g @openai/codex` 후 다시 시도하세요. 특별한 위치에 설치했다면 환경변수 `CODEX_SWITCH_CODEX_BIN`에 전체 경로를 지정하면 됩니다.
 
+**Q. `Not inside a trusted directory and --skip-git-repo-check was not specified.` 오류가 나요.**
+codexswitch가 아니라 Codex CLI 자체의 안전장치입니다. `codex exec`는 git 저장소가 아닌 폴더에서는 실행을 거부합니다. 셋 중 하나로 해결하세요: ① `cxs exec --skip-git-repo-check "..."` 처럼 옵션을 붙여 실행, ② 작업할 프로젝트 폴더(git 저장소)로 이동 후 실행, ③ 그 폴더에서 `codex`를 대화형으로 한 번 실행해 "신뢰" 승인(이후에는 옵션 없이 동작).
+
 **Q. 계정을 전환하면 기존 대화 세션이나 설정이 날아가나요?**
 아니요. 전환되는 것은 **인증 정보(auth.json)뿐**입니다. `config.toml` 설정, 세션 기록, 스킬 등은 모든 계정이 공유합니다.
 
