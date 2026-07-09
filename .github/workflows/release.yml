@@ -23,6 +23,6 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
       - run: npm test
-      # trusted publishing requires npm >= 11.5.1
-      - run: npm install -g npm@latest
+      # node 24 bundles npm >= 11.5.1, which supports trusted publishing;
+      # do NOT upgrade npm in place here — it corrupts its own deps (sigstore)
       - run: npm publish
