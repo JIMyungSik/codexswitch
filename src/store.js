@@ -95,14 +95,19 @@ function listAccounts() {
 
 // Copy refreshed tokens from a live auth.json back into the store, so a
 // token refresh done by codex itself is never lost when we switch accounts.
-// Matches by account_id; prefers the account we believe deployed the file.
+// Matches by email first: team-plan accounts share one chatgpt_account_id
+// per workspace, so matching by account_id alone would let two teammates'
+// tokens overwrite each other. Falls back to account_id for tokens without
+// an email claim. Prefers the account we believe deployed the file.
 function syncBackFrom(authFile) {
   const cur = readJSONSafe(authFile);
   if (!cur) return null;
   const curInfo = authInfo(cur);
   if (!curInfo.accountId) return null;
   const meta = loadMeta();
-  const candidates = listAccounts().filter((a) => a.accountId === curInfo.accountId);
+  const all = listAccounts();
+  const byEmail = curInfo.email ? all.filter((a) => a.email === curInfo.email) : [];
+  const candidates = byEmail.length > 0 ? byEmail : all.filter((a) => a.accountId === curInfo.accountId);
   if (candidates.length === 0) return null;
   const target = candidates.find((a) => a.name === meta.active) || candidates[0];
   const stored = readAccountAuth(target.name);

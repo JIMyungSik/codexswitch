@@ -74,6 +74,10 @@ if (cmd === 'exec') {
     JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'token_count', rate_limits: rl } }) + '\\n'
   );
 
+  if (id === 'acc-a' && process.env.FAKE_AUTH_FAIL === '1') {
+    console.error('ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.');
+    process.exit(1);
+  }
   if (id === 'acc-a' && process.env.FAKE_CUSTOM === '1') { console.error('MY_CUSTOM_LIMIT reached, come back later'); process.exit(1); }
   if (id === 'acc-a' && process.env.FAKE_A_OK !== '1') {
     console.error("You've hit your usage limit. Try again in 2 hours.");
@@ -251,6 +255,41 @@ r = run(['next']);
 assert.match(r.out, /now using "a@test\.com"/);
 r = run(['next']); // wraps back
 assert.match(r.out, /now using "work-b"/);
+
+// --- auth failure: account is disabled with a re-login hint, task rotates ---
+run(['order', 'a@test.com', 'work-b']);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+r = run(['exec', 'auth test'], { env: { FAKE_AUTH_FAIL: '1' } });
+assert.match(r.out, /revoked\/invalid login — disabled/);
+assert.match(r.out, /codexswitch login a@test\.com/);
+assert.match(r.out, /(EXEC|RESUME)_OK acc-b/); // work continued on b
+r = run(['list']);
+assert.match(r.out, /disabled/);
+// re-importing fresh credentials re-enables the account
+fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(fakeAuth('a@test.com', 'acc-a', 'plus', '2026-04-04T00:00:00Z')));
+run(['import', 'a@test.com']);
+r = run(['list']);
+assert.ok(!/disabled/.test(r.out), 'fresh login must re-enable the account');
+
+// --- team workspaces: same account_id, different emails must not cross-sync ---
+fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(fakeAuth('t1@team.com', 'acc-team', 'team', '2026-01-01T00:00:00Z')));
+run(['import', 'team-1']);
+fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(fakeAuth('t2@team.com', 'acc-team', 'team', '2026-01-01T00:00:00Z')));
+run(['import', 'team-2']);
+// a refresh of t2's token (same acc-team id) must land in team-2, not team-1
+fs.writeFileSync(
+  path.join(codexHome, 'auth.json'),
+  JSON.stringify(fakeAuth('t2@team.com', 'acc-team', 'team', '2026-05-05T00:00:00Z'))
+);
+run(['sync']);
+const team1 = JSON.parse(fs.readFileSync(path.join(switchHome, 'accounts', 'team-1.json'), 'utf8'));
+const team2 = JSON.parse(fs.readFileSync(path.join(switchHome, 'accounts', 'team-2.json'), 'utf8'));
+assert.strictEqual(team1.last_refresh, '2026-01-01T00:00:00Z', 'team-1 must be untouched');
+assert.strictEqual(team2.last_refresh, '2026-05-05T00:00:00Z', 'team-2 must receive the refresh');
+run(['remove', 'team-1']);
+run(['remove', 'team-2']);
+run(['use', 'work-b']);
 
 // --- completion script mentions our commands ---
 r = run(['completion', 'bash']);

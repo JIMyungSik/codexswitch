@@ -80,6 +80,9 @@ function storeAccount(name, auth) {
   store.writeAccountAuth(name, auth);
   const meta = store.loadMeta();
   if (!meta.accounts[name]) meta.accounts[name] = { priority: 0, addedAt: Date.now() };
+  // fresh credentials fix whatever got the account disabled or limited
+  delete meta.accounts[name].disabled;
+  delete meta.accounts[name].limitedUntil;
   store.saveMeta(meta);
   out(`${existed ? 'updated' : 'added'} account "${name}"${info.email ? ` (${info.email}, ${info.plan || 'unknown plan'})` : ''}`);
   return name;
@@ -184,7 +187,10 @@ function cmdCurrent() {
     return;
   }
   const info = authInfo(live);
-  const match = store.listAccounts().find((a) => a.accountId === info.accountId);
+  const accounts = store.listAccounts();
+  const match =
+    (info.email && accounts.find((a) => a.email === info.email)) ||
+    accounts.find((a) => a.accountId === info.accountId);
   const name = match ? match.name : '(not stored — run "codexswitch import")';
   const note = meta.active && match && meta.active !== match.name ? ` (meta says "${meta.active}" — out of sync)` : '';
   out(`active: ${name}${note}`);
@@ -442,6 +448,7 @@ function buildExecArgs(rest, meta) {
 }
 
 async function cmdRun(args) {
+  store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
   let name = null;
   let rest = args;
   if (args[0] && store.accountExists(args[0])) {
@@ -486,6 +493,7 @@ async function cmdExec(args) {
   if (explicit && !store.accountExists(explicit)) throw new Error(`no such account: ${explicit}`);
   if (rest[0] === 'resume') allowResume = false; // user drives resume themselves
 
+  store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
   const meta = store.loadMeta();
   const total = store.listAccounts().length;
   if (total === 0) throw new Error('no accounts — add one with "codexswitch login"');
@@ -526,6 +534,15 @@ async function cmdExec(args) {
       }
       console.error(
         `[codexswitch] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating${useResume ? ' and resuming the session' : ''}`
+      );
+      continue;
+    }
+    if (runner.looksAuthFailed(res.output)) {
+      // A revoked token won't heal by itself — take the account out of
+      // rotation and keep the task going on the next one.
+      setFlag(name, { disabled: true });
+      console.error(
+        `[codexswitch] "${name}" has a revoked/invalid login — disabled. Fix it with: codexswitch login ${name}`
       );
       continue;
     }

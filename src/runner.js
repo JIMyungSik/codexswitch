@@ -286,6 +286,15 @@ function sessionTouchedSince(profile, sinceMs) {
 const LIMIT_RE =
   /usage[ _]limit|rate[ _]limit|too many requests|quota (?:exceeded|reached)|\b429\b|hit your (?:usage|weekly|5h) limit/i;
 
+// Credential failures (revoked/invalidated tokens) — re-login required, so
+// rotation should skip this account and tell the user how to fix it.
+const AUTH_RE =
+  /refresh[ _]token[ _](?:was )?(?:revoked|invalidated)|token_invalidated|please log ?out and sign in again|please try signing in again|401 unauthorized/i;
+
+function looksAuthFailed(output) {
+  return AUTH_RE.test(output || '');
+}
+
 function looksRateLimited(output, extraPatterns = []) {
   if (LIMIT_RE.test(output || '')) return true;
   for (const p of extraPatterns) {
@@ -313,6 +322,7 @@ module.exports = {
   buildProfile,
   runCodex,
   looksRateLimited,
+  looksAuthFailed,
   limitCooldownMs,
   scanUsage,
   recordUsage,
