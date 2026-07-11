@@ -1,6 +1,6 @@
 {
   "name": "@carjms/codexswitch",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Multi-account manager for OpenAI Codex CLI with quota-based rotation (inspired by KarpelesLab/teamclaude)",
   "license": "MIT",
   "repository": {
