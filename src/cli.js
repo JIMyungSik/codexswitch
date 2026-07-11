@@ -14,7 +14,9 @@ Accounts
   login [name]            log in to a new account (isolated "codex login") and store it
   import [name]           import the account currently in ~/.codex/auth.json
   add-key <name> [key]    register an OpenAI API-key account (or read $OPENAI_API_KEY)
-  list                    list stored accounts (alias: accounts, status)
+  list                    list stored accounts (alias: accounts)
+  usage [name]            per-account 5h/weekly usage gauges with reset times
+                          (alias: status)
   use <name>              make <name> the active account in ~/.codex
   current                 show the active account
   next                    switch to the next account in rotation order (wraps around)
@@ -341,6 +343,49 @@ function cmdModel(args) {
   out(`default model set to "${meta.model}" (applied to run/exec)`);
 }
 
+// Per-account usage dashboard: gauge bars for the 5h / weekly windows with
+// reset countdowns, based on what codex recorded in its session files.
+function cmdUsage(args) {
+  const meta = store.loadMeta();
+  let accounts = store.listAccounts();
+  if (args[0]) {
+    accounts = accounts.filter((a) => a.name === args[0]);
+    if (accounts.length === 0) throw new Error(`no such account: ${args[0]}`);
+  }
+  if (accounts.length === 0) {
+    out('no accounts yet — add one with "codexswitch login" or "codexswitch import"');
+    return;
+  }
+  const now = Date.now();
+  const bar = (pct, threshold) => {
+    const width = 20;
+    const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+    const paint = pct >= threshold ? ui.red : pct >= 70 ? ui.yellow : ui.green;
+    return `[${paint('█'.repeat(filled))}${ui.dim('░'.repeat(width - filled))}]`;
+  };
+  const line = (label, win, threshold) => {
+    if (!win || typeof win.pct !== 'number') return `  ${label} ${ui.dim('no data')}`;
+    const pct = Math.round(win.pct);
+    const reset = win.resetAt && win.resetAt > now ? ` resets in ${fmtRemaining(win.resetAt)}` : '';
+    const overMark = win.pct >= threshold ? ` ${ui.red(`≥ threshold ${threshold}%`)}` : '';
+    return `  ${label} ${bar(win.pct, threshold)} ${String(pct).padStart(3)}%${ui.dim(reset)}${overMark}`;
+  };
+  for (const a of accounts) {
+    const mark = a.active ? ui.green('●') : ' ';
+    const state = a.disabled ? ui.red(' [disabled]') : a.limitedUntil && a.limitedUntil > now ? ui.yellow(` [limited ${fmtRemaining(a.limitedUntil)}]`) : '';
+    out(`${mark} ${ui.bold(a.name)}${ui.dim(` (${a.plan || a.email || '-'})`)}${state}`);
+    if (!a.usage) {
+      out(ui.dim('  no usage data yet — codex records it during runs (try "codexswitch run" once)'));
+    } else {
+      out(line('5h    ', a.usage.p5h, meta.threshold5h));
+      out(line('weekly', a.usage.weekly, meta.thresholdWeekly));
+      if (a.usage.at) out(ui.dim(`  measured ${fmtDate(a.usage.at)}`));
+    }
+  }
+  const next = store.pickAccount();
+  out(ui.dim(`\nrotation would pick: ${next ? next.name : '(none usable)'} · threshold 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`));
+}
+
 // Rotate-early thresholds: how full the 5h / weekly window may get before
 // the account is skipped in rotation.
 function cmdThreshold(args) {
@@ -424,7 +469,7 @@ function cmdNames() {
 }
 
 const COMMANDS =
-  'login import add-key list use current next run exec order model remove rename ' +
+  'login import add-key list usage use current next run exec order model remove rename ' +
   'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
 
 function cmdCompletion(args) {
@@ -595,8 +640,10 @@ async function main(argv) {
       return cmdImport(args), 0;
     case 'list':
     case 'accounts':
-    case 'status':
       return cmdList(), 0;
+    case 'usage':
+    case 'status':
+      return cmdUsage(args), 0;
     case 'use':
       return cmdUse(args), 0;
     case 'current':

@@ -205,7 +205,8 @@ cxs list                # per-account 5h/week usage columns
 | `cxs login [name]` | Log in to a new account and store it (existing login untouched; defaults to the email as the name) |
 | `cxs import [name]` | Import the account currently in `~/.codex` |
 | `cxs add-key <name> [key]` | Register an OpenAI API-key account (falls back to `$OPENAI_API_KEY`) |
-| `cxs list` | List accounts: active marker (`*`), email, plan, priority, limit status |
+| `cxs list` | List accounts: active marker, email, plan, priority, limit status, usage % |
+| `cxs usage [name]` | Per-account usage dashboard: 5h/weekly gauge bars, reset countdowns, next rotation pick (alias: `status`) |
 | `cxs use <name>` | Switch the active account |
 | `cxs current` | Show the active account |
 | `cxs next` | Switch to the next account in rotation order (wraps around) |

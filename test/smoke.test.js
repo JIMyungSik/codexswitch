@@ -211,6 +211,15 @@ assert.match(r.out, /97% of its 5h limit/);
 r = run(['list']);
 assert.match(r.out, /over-5h/);
 assert.match(r.out, /97%/);
+// usage dashboard shows the gauge, reset countdown, and rotation pick
+r = run(['usage']);
+assert.match(r.out, /97%/);
+assert.match(r.out, /resets in/);
+assert.match(r.out, /≥ threshold 90%/);
+assert.match(r.out, /rotation would pick: a@test\.com/);
+r = run(['usage', 'work-b']);
+assert.match(r.out, /work-b/);
+assert.ok(!/a@test\.com \(/.test(r.out), 'single-account usage must filter');
 // next exec must skip work-b (over threshold) and use a@test.com
 r = run(['exec', 'next task', 'hi'], { env: { FAKE_A_OK: '1' } });
 assert.match(r.out, /EXEC_OK acc-a/);

@@ -85,6 +85,7 @@ function fmtRemaining(untilTs) {
   if (ms <= 0) return 'now';
   const h = Math.floor(ms / 3600000);
   const m = Math.round((ms % 3600000) / 60000);
+  if (h >= 48) return `${Math.floor(h / 24)}d${h % 24}h`;
   return h > 0 ? `${h}h${m}m` : `${m}m`;
 }
 
