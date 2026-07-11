@@ -36,6 +36,34 @@ function loadMeta() {
   return meta;
 }
 
+// Append an event to the activity log (rotations, limits, auth failures...).
+function logEvent(type, message) {
+  try {
+    ensureDir(paths().home);
+    fs.appendFileSync(
+      path.join(paths().home, 'activity.log'),
+      JSON.stringify({ at: new Date().toISOString(), type, message }) + '\n'
+    );
+  } catch {
+    /* logging must never break the tool */
+  }
+}
+
+function readEvents(count = 20) {
+  try {
+    const lines = fs.readFileSync(path.join(paths().home, 'activity.log'), 'utf8').trim().split('\n');
+    return lines.slice(-count).map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function saveMeta(meta) {
   writeJSONAtomic(paths().metaPath, meta);
 }
@@ -83,14 +111,27 @@ function listAccounts() {
       return {
         name,
         ...authInfo(auth),
-        priority: m.priority ?? 0,
+        priority: m.priority ?? null, // null = auto (use-or-lose ordering)
         disabled: !!m.disabled,
         limitedUntil: m.limitedUntil || null,
         usage: m.usage || null,
         active: meta.active === name,
       };
     })
-    .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name));
+    .sort(rotationCompare);
+}
+
+// Rotation order: pinned accounts (explicit priority) come first in pin
+// order; auto accounts follow, spending the one whose weekly quota resets
+// soonest first (use-or-lose — quota about to refresh anyway gets burned
+// first). Ties prefer the active account to avoid needless switching.
+function rotationCompare(a, b) {
+  const aPinned = a.priority != null;
+  const bPinned = b.priority != null;
+  if (aPinned !== bPinned) return aPinned ? -1 : 1;
+  if (aPinned && a.priority !== b.priority) return a.priority - b.priority;
+  const reset = (x) => (x.usage && x.usage.weekly && x.usage.weekly.resetAt) || Infinity;
+  return reset(a) - reset(b) || Number(b.active) - Number(a.active) || a.name.localeCompare(b.name);
 }
 
 // Copy refreshed tokens from a live auth.json back into the store, so a
@@ -187,8 +228,10 @@ function pickAccount(exclude = []) {
   const meta = loadMeta();
   const usable = listAccounts().filter((a) => !exclude.includes(a.name) && isUsable(a, meta, now));
   if (usable.length === 0) return null;
-  const group = usable.filter((a) => a.priority === usable[0].priority);
-  return group.find((a) => a.active) || group[0];
+  // listAccounts is already in rotation order (pins first, then use-or-lose,
+  // active as tiebreaker) — but a pinned tie should still stick to active.
+  const top = usable.filter((a) => a.priority != null && a.priority === usable[0].priority);
+  return top.find((a) => a.active) || usable[0];
 }
 
 // Next usable account after the active one, following priority order and
@@ -223,6 +266,8 @@ module.exports = {
   isUsable,
   pickAccount,
   nextAccount,
+  logEvent,
+  readEvents,
   ensureDirs() {
     const p = paths();
     ensureDir(p.home);

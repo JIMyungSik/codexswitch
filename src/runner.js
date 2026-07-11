@@ -164,7 +164,8 @@ function refreshCopy(target, dest) {
 // Run codex for one account inside its overlay profile.
 // capture=false: interactive, stdio inherited. capture=true: stream output
 // through while also collecting it so the caller can detect limit errors.
-function runCodex(name, args, { capture = false } = {}) {
+// silent=true (with capture): collect without echoing (used by probe).
+function runCodex(name, args, { capture = false, silent = false } = {}) {
   assertCodexAvailable();
   const profile = buildProfile(name);
   const env = { ...process.env, CODEX_HOME: profile };
@@ -182,7 +183,7 @@ function runCodex(name, args, { capture = false } = {}) {
         stream.on('data', (chunk) => {
           out += chunk.toString('utf8');
           if (out.length > 262144) out = out.slice(-131072);
-          dest.write(chunk);
+          if (!silent) dest.write(chunk);
         });
       };
       collect(child.stdout, process.stdout);

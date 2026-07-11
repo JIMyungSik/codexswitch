@@ -17,6 +17,10 @@ Accounts
   list                    list stored accounts (alias: accounts)
   usage [name]            per-account 5h/weekly usage gauges with reset times
                           (alias: status)
+  watch                   live usage dashboard, refreshes every 5s (q to quit)
+  probe [name]            warm up quota gauges with a minimal request per
+                          account (costs a few tokens; alias: warmup)
+  log [count]             recent activity: switches, limits, rotations
   use <name>              make <name> the active account in ~/.codex
   current                 show the active account
   next                    switch to the next account in rotation order (wraps around)
@@ -24,8 +28,9 @@ Accounts
   rename <old> <new>      rename a stored account
   enable <name>           re-enable a disabled account
   disable <name>          temporarily exclude an account from rotation
-  order [name...]         show or set the rotation order in one command
-  priority <name> <n>     set one account's priority (lower = preferred, default 0)
+  order [name...]         pin the rotation order in one command; accounts not
+                          listed rotate by soonest weekly reset (use-or-lose)
+  priority <name> <n|auto>  pin one account's priority, or "auto" to unpin
   clear-limit <name>      forget a recorded rate-limit for an account
 
 Running codex
@@ -86,7 +91,7 @@ function storeAccount(name, auth) {
   const existed = store.accountExists(name);
   store.writeAccountAuth(name, auth);
   const meta = store.loadMeta();
-  if (!meta.accounts[name]) meta.accounts[name] = { priority: 0, addedAt: Date.now() };
+  if (!meta.accounts[name]) meta.accounts[name] = { addedAt: Date.now() };
   // fresh credentials fix whatever got the account disabled or limited
   delete meta.accounts[name].disabled;
   delete meta.accounts[name].limitedUntil;
@@ -162,7 +167,7 @@ function cmdList() {
       a.active ? ui.bold(a.name) : a.name,
       ui.dim(a.email || '-'),
       a.plan,
-      a.priority,
+      a.priority == null ? ui.dim('auto') : a.priority,
       status,
       pct(a.usage && a.usage.p5h, meta.threshold5h),
       pct(a.usage && a.usage.weekly, meta.thresholdWeekly),
@@ -182,9 +187,10 @@ function cmdUse(args) {
   writeJSONAtomic(p.authPath, auth, 0o600);
   const meta = store.loadMeta();
   meta.active = name;
-  if (!meta.accounts[name]) meta.accounts[name] = { priority: 0 };
+  if (!meta.accounts[name]) meta.accounts[name] = {};
   meta.accounts[name].lastUsed = Date.now();
   store.saveMeta(meta);
+  store.logEvent('switch', `now using "${name}"`);
   const info = authInfo(auth);
   out(ui.ok(`now using ${ui.bold(`"${name}"`)}${info.email ? ui.dim(` (${info.email}, ${info.plan || 'unknown plan'})`) : ''}`));
 }
@@ -271,10 +277,18 @@ function setFlag(name, patch) {
 
 function cmdPriority(args) {
   const name = requireArg(args, 0, 'account name');
-  const n = parseInt(requireArg(args, 1, 'priority number'), 10);
-  if (Number.isNaN(n)) throw new Error('priority must be a number');
+  const value = requireArg(args, 1, 'priority number or "auto"');
+  if (value === 'auto') {
+    const meta = store.loadMeta();
+    if (meta.accounts[name]) delete meta.accounts[name].priority;
+    store.saveMeta(meta);
+    out(ui.ok(`"${name}" unpinned — rotates by soonest weekly reset (use-or-lose)`));
+    return;
+  }
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n)) throw new Error('priority must be a number or "auto"');
   setFlag(name, { priority: n });
-  out(`priority of "${name}" set to ${n}`);
+  out(ui.ok(`priority of "${name}" pinned to ${n}`));
 }
 
 function cmdCooldown(args) {
@@ -317,13 +331,16 @@ function cmdOrder(args) {
   for (const name of args) {
     meta.accounts[name] = { ...(meta.accounts[name] || {}), priority: prio++ };
   }
+  // accounts not listed become "auto" and rotate by soonest weekly reset
   for (const a of accounts) {
     if (args.includes(a.name)) continue;
-    meta.accounts[a.name] = { ...(meta.accounts[a.name] || {}), priority: prio++ };
+    if (meta.accounts[a.name]) delete meta.accounts[a.name].priority;
   }
   store.saveMeta(meta);
-  out('rotation order set:');
-  store.listAccounts().forEach((a, i) => out(`${i + 1}. ${a.name}`));
+  out(ui.ok('rotation order set:'));
+  store.listAccounts().forEach((a, i) =>
+    out(`${i + 1}. ${a.name}${a.priority == null ? ui.dim(' (auto)') : ''}`)
+  );
 }
 
 function cmdModel(args) {
@@ -384,6 +401,95 @@ function cmdUsage(args) {
   }
   const next = store.pickAccount();
   out(ui.dim(`\nrotation would pick: ${next ? next.name : '(none usable)'} · threshold 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`));
+}
+
+// Warm up quota measurements: send a minimal request per account so the
+// usage gauges (and use-or-lose ordering) have data. Costs a few tokens.
+async function cmdProbe(args) {
+  runner.assertCodexAvailable();
+  const meta = store.loadMeta();
+  let accounts = store.listAccounts().filter((a) => !a.disabled);
+  if (args[0]) {
+    accounts = accounts.filter((a) => a.name === args[0]);
+    if (accounts.length === 0) throw new Error(`no such account: ${args[0]}`);
+  }
+  if (accounts.length === 0) throw new Error('no enabled accounts to probe');
+  out(ui.info(ui.dim(`probing ${accounts.length} account(s) with a minimal request...`)));
+  let failures = 0;
+  for (const a of accounts) {
+    const startTs = Date.now();
+    const res = await runner.runCodex(
+      a.name,
+      ['exec', ...buildExecArgs(['Reply with exactly: ok'], meta)],
+      { capture: true, silent: true }
+    );
+    const usage = runner.recordUsage(a.name, res.profile, startTs);
+    if (res.code !== 0) {
+      failures++;
+      const why = runner.looksAuthFailed(res.output)
+        ? `login revoked — fix with "codexswitch login ${a.name}"`
+        : runner.looksRateLimited(res.output, meta.limitPatterns)
+          ? 'rate limited'
+          : `exit ${res.code}`;
+      out(ui.fail(`${a.name}: ${why}`));
+      store.logEvent('probe', `${a.name} failed: ${why}`);
+    } else if (usage && usage.p5h) {
+      out(ui.ok(`${a.name}: 5h ${Math.round(usage.p5h.pct)}%${usage.weekly ? ` / weekly ${Math.round(usage.weekly.pct)}%` : ''}`));
+      store.logEvent('probe', `${a.name} measured`);
+    } else {
+      out(ui.warn(`${a.name}: reachable, but codex reported no usage data`));
+    }
+  }
+  return failures > 0 ? 1 : 0;
+}
+
+function cmdLog(args) {
+  const count = args[0] ? parseInt(args[0], 10) : 20;
+  if (Number.isNaN(count) || count < 1) throw new Error('usage: codexswitch log [count]');
+  const events = store.readEvents(count);
+  if (events.length === 0) {
+    out('no activity yet');
+    return;
+  }
+  const color = { limit: ui.yellow, auth: ui.red, probe: ui.cyan, switch: ui.green, exec: ui.green };
+  for (const e of events) {
+    const paint = color[e.type] || ((s) => s);
+    out(`${ui.dim(e.at.replace('T', ' ').slice(0, 19))}  ${paint(e.type.padEnd(6))} ${e.message}`);
+  }
+}
+
+// Live dashboard: re-renders the usage view every few seconds until "q".
+async function cmdWatch() {
+  if (!process.stdout.isTTY) {
+    cmdUsage([]);
+    return 0;
+  }
+  const render = () => {
+    process.stdout.write('\x1b[2J\x1b[H');
+    out(`${ui.bold('codexswitch watch')}${ui.dim(`  ${new Date().toLocaleTimeString()} · refreshes every 5s · q to quit`)}\n`);
+    cmdUsage([]);
+    const events = store.readEvents(5);
+    if (events.length > 0) {
+      out(ui.dim('\nrecent activity:'));
+      for (const e of events) out(ui.dim(`  ${e.at.replace('T', ' ').slice(11, 19)}  ${e.type}: ${e.message}`));
+    }
+  };
+  render();
+  const timer = setInterval(render, 5000);
+  await new Promise((resolve) => {
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', (b) => {
+      const s = b.toString();
+      if (s === 'q' || s === '\u0003') {
+        clearInterval(timer);
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+        process.stdin.pause();
+        resolve();
+      }
+    });
+  });
+  return 0;
 }
 
 // Rotate-early thresholds: how full the 5h / weekly window may get before
@@ -469,7 +575,7 @@ function cmdNames() {
 }
 
 const COMMANDS =
-  'login import add-key list usage use current next run exec order model remove rename ' +
+  'login import add-key list usage watch probe log use current next run exec order model remove rename ' +
   'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
 
 function cmdCompletion(args) {
@@ -578,6 +684,7 @@ async function cmdExec(args) {
     if (res.code === 0) {
       store.clearLimited(name);
       console.error(ui.ok(`done as ${ui.bold(`"${name}"`)}`));
+      store.logEvent('exec', `done as "${name}"${useResume ? ' (resumed session)' : ''}`);
       warnIfOverThreshold(name);
       return 0;
     }
@@ -590,6 +697,7 @@ async function cmdExec(args) {
       console.error(
         ui.warn(`"${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating${useResume ? ' and resuming the session' : ''}`)
       );
+      store.logEvent('limit', `"${name}" paused until ${fmtDate(until)}`);
       continue;
     }
     if (runner.looksAuthFailed(res.output)) {
@@ -599,6 +707,7 @@ async function cmdExec(args) {
       console.error(
         ui.fail(`"${name}" has a revoked/invalid login — disabled. Fix it with: ${ui.bold(`codexswitch login ${name}`)}`)
       );
+      store.logEvent('auth', `"${name}" disabled (revoked login)`);
       continue;
     }
     return res.code; // real failure, don't burn other accounts on it
@@ -644,6 +753,15 @@ async function main(argv) {
     case 'usage':
     case 'status':
       return cmdUsage(args), 0;
+    case 'watch':
+    case 'dashboard':
+      return cmdWatch();
+    case 'probe':
+    case 'warmup':
+      return cmdProbe(args);
+    case 'log':
+    case 'activity':
+      return cmdLog(args), 0;
     case 'use':
       return cmdUse(args), 0;
     case 'current':

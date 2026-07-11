@@ -207,13 +207,16 @@ cxs list                # per-account 5h/week usage columns
 | `cxs add-key <name> [key]` | Register an OpenAI API-key account (falls back to `$OPENAI_API_KEY`) |
 | `cxs list` | List accounts: active marker, email, plan, priority, limit status, usage % |
 | `cxs usage [name]` | Per-account usage dashboard: 5h/weekly gauge bars, reset countdowns, next rotation pick (alias: `status`) |
+| `cxs watch` | Live dashboard — auto-refreshes every 5s with recent activity (q to quit) |
+| `cxs probe [name]` | Warm up the usage gauges with one minimal request per account (costs a few tokens) |
+| `cxs log [count]` | Recent activity: account switches, limits hit, rotations, probes |
 | `cxs use <name>` | Switch the active account |
 | `cxs current` | Show the active account |
 | `cxs next` | Switch to the next account in rotation order (wraps around) |
 | `cxs run [name] [args...]` | Run codex as a specific account without switching (isolated env) |
 | `cxs exec [args...]` | `codex exec` + automatic rotation on usage limits — the next account resumes the same session; works outside git repos |
 | `cxs exec -a <name> ...` | Start exec with a specific account (`--no-resume`: restart instead of resuming) |
-| `cxs order [names...]` | Set the rotation order in one command (no args: show it) |
+| `cxs order [names...]` | Pin the rotation order; unlisted accounts rotate by **soonest weekly reset** (use-or-lose) |
 | `cxs model [name]` | Set the default model injected into `run`/`exec` (`default` to reset) |
 | `cxs threshold [5h%] [wk%]` | Rotate to the next account when usage reaches these percents (default 95; one value sets both) |
 | `cxs patterns [add/remove]` | Custom regex patterns treated as rate-limit errors |
@@ -224,7 +227,7 @@ cxs list                # per-account 5h/week usage columns
 | `cxs remove <name>` | Delete an account |
 | `cxs rename <old> <new>` | Rename an account |
 | `cxs disable / enable <name>` | Temporarily exclude from / restore to rotation |
-| `cxs priority <name> <n>` | Change one account's priority (lower = preferred, default 0) |
+| `cxs priority <name> <n\|auto>` | Pin one account's priority, or `auto` to unpin (use-or-lose rotation) |
 | `cxs clear-limit <name>` | Manually clear a recorded rate-limit |
 | `cxs cooldown [minutes]` | Show/set the default cooldown after a limit is detected (default 60) |
 | `cxs sync` | Save tokens refreshed by codex back into the store |

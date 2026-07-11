@@ -309,6 +309,37 @@ r = run(['goal', 'list']);
 assert.match(r.out, /forwarding to codex: codex goal list/);
 assert.match(r.out, /running codex as/);
 
+// --- probe: warms up gauges silently, reports per-account usage ---
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+r = run(['probe', 'work-b'], { env: { FAKE_USED_PCT: '42' } });
+assert.match(r.out, /work-b: 5h 42%/);
+assert.ok(!/EXEC_OK/.test(r.out), 'probe must not echo codex output');
+
+// --- activity log records switches/limits/probes ---
+r = run(['log']);
+assert.match(r.out, /probe/);
+assert.match(r.out, /switch/);
+
+// --- use-or-lose: unpinned accounts rotate by soonest weekly reset ---
+run(['priority', 'a@test.com', 'auto']);
+run(['priority', 'work-b', 'auto']);
+{
+  const metaFile = path.join(switchHome, 'meta.json');
+  const m = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  const t = Date.now();
+  m.accounts['a@test.com'].usage = { p5h: { pct: 10, resetAt: t + 3600e3 }, weekly: { pct: 10, resetAt: t + 86400e3 }, at: t };
+  m.accounts['work-b'].usage = { p5h: { pct: 10, resetAt: t + 3600e3 }, weekly: { pct: 10, resetAt: t + 3600e3 }, at: t }; // resets sooner
+  fs.writeFileSync(metaFile, JSON.stringify(m));
+}
+r = run(['usage']);
+assert.match(r.out, /rotation would pick: work-b/); // soonest weekly reset wins
+run(['priority', 'a@test.com', '0']); // pinning beats use-or-lose
+r = run(['usage']);
+assert.match(r.out, /rotation would pick: a@test\.com/);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+
 // --- disable everything -> exec must fail cleanly ---
 run(['disable', 'a@test.com']);
 run(['disable', 'work-b']);
