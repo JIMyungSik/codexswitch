@@ -89,10 +89,10 @@ if (cmd === 'exec') {
   }
   // like real codex (clap): any unknown dash-argument before "--" is fatal
   const sepIdx = process.argv.indexOf('--');
-  const KNOWN = ['--skip-git-repo-check', '--last', '-m', '-c'];
+  const KNOWN = ['--skip-git-repo-check', '--last', '-m', '-c', '--sandbox'];
   for (let i = 3; i < (sepIdx === -1 ? process.argv.length : sepIdx); i++) {
     const arg = process.argv[i];
-    if (['-m', '-c'].includes(process.argv[i - 1])) continue; // option values
+    if (['-m', '-c', '--sandbox'].includes(process.argv[i - 1])) continue; // option values
     if (arg.startsWith('-') && !KNOWN.includes(arg) && arg !== 'resume') {
       console.error("error: unexpected argument '" + arg + "' found");
       process.exit(2);
@@ -100,7 +100,9 @@ if (cmd === 'exec') {
   }
   const cfgs = [];
   process.argv.forEach((a, i2) => { if (a === '-c') cfgs.push(process.argv[i2 + 1]); });
-  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + (cfgs.length ? ' cfg=' + cfgs.join(',') : ''));
+  const sbi = process.argv.indexOf('--sandbox');
+  const sb = sbi > -1 ? ' sb=' + process.argv[sbi + 1] : '';
+  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + sb + (cfgs.length ? ' cfg=' + cfgs.join(',') : ''));
   process.exit(0);
 }
 process.exit(0);
@@ -215,6 +217,16 @@ assert.match(r.out, /cfg=model_reasoning_summary=concise/);
 run(['reasoning', 'show']);
 r = run(['exec', 'normal again']);
 assert.ok(!/cfg=/.test(r.out), 'show mode must not inject -c overrides');
+
+// --- sandbox: write mode injects --sandbox workspace-write ---
+run(['sandbox', 'write']);
+r = run(['exec', 'edit some files']);
+assert.match(r.out, /sb=workspace-write/);
+r = run(['exec', '--sandbox', 'read-only', 'explicit wins']);
+assert.match(r.out, /sb=read-only/); // user's own flag is respected
+run(['sandbox', 'read-only']);
+r = run(['exec', 'back to default']);
+assert.ok(!/sb=/.test(r.out), 'default must not inject --sandbox');
 
 // --- --no-resume: rotation restarts the prompt instead of resuming ---
 run(['order', 'a@test.com', 'work-b']); // a first, a always limit-fails

@@ -53,6 +53,8 @@ Settings
   model [name|default]    show/set the default model injected into run/exec
   reasoning [mode]        how much model reasoning to print during runs:
                           show (codex default) | concise | hide
+  sandbox [mode]          file access for exec/chat: read-only (codex default)
+                          | write (edit files in cwd) | full (no sandbox)
   threshold [5h%] [wk%]   rotate early when recorded usage reaches these percents
                           of the 5-hour / weekly window (default 95, one value = both)
   cooldown [minutes]      show/set rate-limit cooldown (default 60)
@@ -644,7 +646,7 @@ function cmdNames() {
 
 const COMMANDS =
   'login import add-key list usage watch probe log chat server use current next run exec order model remove rename ' +
-  'enable disable priority clear-limit cooldown threshold reasoning patterns export restore sync completion help';
+  'enable disable priority clear-limit cooldown threshold reasoning sandbox patterns export restore sync completion help';
 
 function cmdCompletion(args) {
   const shell = args[0];
@@ -684,8 +686,42 @@ function injectExecFlags(rest, meta) {
   if (!args.includes('--skip-git-repo-check')) args.unshift('--skip-git-repo-check');
   const hasModel = args.some((a) => a === '-m' || a === '--model' || a.startsWith('--model='));
   if (meta.model && !hasModel) args.unshift('-m', meta.model);
+  const hasSandbox = args.some(
+    (a) =>
+      a === '--sandbox' ||
+      a.startsWith('--sandbox=') ||
+      a === '--full-auto' ||
+      a === '--dangerously-bypass-approvals-and-sandbox'
+  );
+  if (meta.sandbox && !hasSandbox) args.unshift('--sandbox', meta.sandbox);
   args.unshift(...reasoningFlags(meta, args));
   return args;
+}
+
+const SANDBOX_MODES = { 'read-only': 'read-only', write: 'workspace-write', 'workspace-write': 'workspace-write', full: 'danger-full-access', 'danger-full-access': 'danger-full-access' };
+
+// codex exec defaults to a read-only sandbox; this setting lets it write.
+function cmdSandbox(args) {
+  const meta = store.loadMeta();
+  if (args[0] == null) {
+    out(`sandbox: ${meta.sandbox || 'read-only (codex exec default)'} ${ui.dim('(read-only | write | full)')}`);
+    return;
+  }
+  if (args[0] === 'read-only' || args[0] === 'default') {
+    delete meta.sandbox;
+    store.saveMeta(meta);
+    out(ui.ok('sandbox back to codex default (read-only in exec)'));
+    return;
+  }
+  const mode = SANDBOX_MODES[args[0]];
+  if (!mode) throw new Error('usage: codexswitch sandbox <read-only|write|full>');
+  meta.sandbox = mode;
+  store.saveMeta(meta);
+  out(
+    mode === 'workspace-write'
+      ? ui.ok('sandbox set to workspace-write — codex can edit files in the working directory')
+      : ui.warn('sandbox set to danger-full-access — codex can touch anything, use with care')
+  );
 }
 
 // -c overrides implementing "cxs reasoning hide|concise|show".
@@ -929,12 +965,14 @@ async function cmdChat() {
       try {
         if (cmd === 'quit' || cmd === 'exit' || cmd === 'q') break;
         else if (cmd === 'help')
-          out(ui.dim('/usage /list /use <name> /next /model [m] /new (fresh session) /quit'));
+          out(ui.dim('/usage /list /use <name> /next /model [m] /sandbox [mode] /reasoning [mode] /new (fresh session) /quit'));
         else if (cmd === 'usage') cmdUsage([]);
         else if (cmd === 'list') cmdList();
         else if (cmd === 'use') cmdUse(rest);
         else if (cmd === 'next') cmdNext();
         else if (cmd === 'model') cmdModel(rest);
+        else if (cmd === 'sandbox') cmdSandbox(rest);
+        else if (cmd === 'reasoning') cmdReasoning(rest);
         else if (cmd === 'new') {
           inSession = false;
           out(ui.ok('starting a fresh session on the next prompt'));
@@ -1029,6 +1067,8 @@ async function main(argv) {
       return cmdModel(args), 0;
     case 'reasoning':
       return cmdReasoning(args), 0;
+    case 'sandbox':
+      return cmdSandbox(args), 0;
     case 'add-key':
     case 'apikey':
       return cmdAddKey(args), 0;
