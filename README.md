@@ -221,7 +221,7 @@ cxs list                # per-account 5h/week usage columns
 | `cxs model [name]` | Set the default model injected into `run`/`exec` (`default` to reset) |
 | `cxs threshold [5h%] [wk%]` | Rotate to the next account when usage reaches these percents (default 95; one value sets both) |
 | `cxs reasoning <show\|concise\|hide>` | How much model reasoning ("thinking") to print during runs — `hide` for clean output, `concise` for one-line summaries |
-| `cxs sandbox <read-only\|write\|full>` | File access for exec/chat — codex exec defaults to read-only; `write` lets it edit files in the working directory |
+| `cxs sandbox <read-only\|write\|write+net\|full>` | File access for exec/chat — `write` edits files in cwd, `write+net` also allows ssh/curl/network, `full` disables the sandbox |
 | `cxs patterns [add/remove]` | Custom regex patterns treated as rate-limit errors |
 | `cxs export <file>` | Back up all accounts + settings (⚠️ contains tokens — treat like a password) |
 | `cxs restore <file>` | Restore accounts from a backup (for moving machines) |

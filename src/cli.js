@@ -54,7 +54,8 @@ Settings
   reasoning [mode]        how much model reasoning to print during runs:
                           show (codex default) | concise | hide
   sandbox [mode]          file access for exec/chat: read-only (codex default)
-                          | write (edit files in cwd) | full (no sandbox)
+                          | write (edit files in cwd) | write+net (also allow
+                          ssh/curl/network) | full (no sandbox)
   threshold [5h%] [wk%]   rotate early when recorded usage reaches these percents
                           of the 5-hour / weekly window (default 95, one value = both)
   cooldown [minutes]      show/set rate-limit cooldown (default 60)
@@ -693,12 +694,27 @@ function injectExecFlags(rest, meta) {
       a === '--full-auto' ||
       a === '--dangerously-bypass-approvals-and-sandbox'
   );
-  if (meta.sandbox && !hasSandbox) args.unshift('--sandbox', meta.sandbox);
+  if (meta.sandbox && !hasSandbox) {
+    if (meta.sandbox === 'workspace-write+net') {
+      // workspace-write plus outbound network (ssh, curl, npm install...)
+      args.unshift('--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true');
+    } else {
+      args.unshift('--sandbox', meta.sandbox);
+    }
+  }
   args.unshift(...reasoningFlags(meta, args));
   return args;
 }
 
-const SANDBOX_MODES = { 'read-only': 'read-only', write: 'workspace-write', 'workspace-write': 'workspace-write', full: 'danger-full-access', 'danger-full-access': 'danger-full-access' };
+const SANDBOX_MODES = {
+  'read-only': 'read-only',
+  write: 'workspace-write',
+  'workspace-write': 'workspace-write',
+  'write+net': 'workspace-write+net',
+  net: 'workspace-write+net',
+  full: 'danger-full-access',
+  'danger-full-access': 'danger-full-access',
+};
 
 // codex exec defaults to a read-only sandbox; this setting lets it write.
 function cmdSandbox(args) {
@@ -714,14 +730,15 @@ function cmdSandbox(args) {
     return;
   }
   const mode = SANDBOX_MODES[args[0]];
-  if (!mode) throw new Error('usage: codexswitch sandbox <read-only|write|full>');
+  if (!mode) throw new Error('usage: codexswitch sandbox <read-only|write|write+net|full>');
   meta.sandbox = mode;
   store.saveMeta(meta);
-  out(
-    mode === 'workspace-write'
-      ? ui.ok('sandbox set to workspace-write — codex can edit files in the working directory')
-      : ui.warn('sandbox set to danger-full-access — codex can touch anything, use with care')
-  );
+  const messages = {
+    'workspace-write': ui.ok('sandbox set to workspace-write — codex can edit files in the working directory'),
+    'workspace-write+net': ui.ok('sandbox set to workspace-write + network — codex can also use ssh/curl/npm'),
+    'danger-full-access': ui.warn('sandbox set to danger-full-access — codex can touch anything, use with care'),
+  };
+  out(messages[mode]);
 }
 
 // -c overrides implementing "cxs reasoning hide|concise|show".

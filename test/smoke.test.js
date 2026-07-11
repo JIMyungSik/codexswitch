@@ -224,6 +224,10 @@ r = run(['exec', 'edit some files']);
 assert.match(r.out, /sb=workspace-write/);
 r = run(['exec', '--sandbox', 'read-only', 'explicit wins']);
 assert.match(r.out, /sb=read-only/); // user's own flag is respected
+run(['sandbox', 'write+net']);
+r = run(['exec', 'ssh to server']);
+assert.match(r.out, /sb=workspace-write/);
+assert.match(r.out, /cfg=sandbox_workspace_write.network_access=true/);
 run(['sandbox', 'read-only']);
 r = run(['exec', 'back to default']);
 assert.ok(!/sb=/.test(r.out), 'default must not inject --sandbox');

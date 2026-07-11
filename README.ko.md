@@ -219,7 +219,7 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs model [모델명]` | `run`/`exec`에 자동 적용할 기본 모델 설정 (`default`로 초기화) |
 | `cxs threshold [5h%] [주간%]` | 사용량이 이 퍼센트에 도달하면 다음 계정으로 전환 (기본 95, 값 하나면 둘 다) |
 | `cxs reasoning <show\|concise\|hide>` | 실행 중 모델 추론("생각") 출력량 조절 — `hide`는 완전 숨김, `concise`는 한 줄 요약 |
-| `cxs sandbox <read-only\|write\|full>` | exec/chat의 파일 접근 권한 — codex exec 기본은 읽기 전용; `write`면 작업 폴더 파일 수정 가능 |
+| `cxs sandbox <read-only\|write\|write+net\|full>` | exec/chat의 파일 접근 권한 — `write`는 작업 폴더 수정, `write+net`은 ssh/curl 등 네트워크까지 허용, `full`은 샌드박스 해제 |
 | `cxs patterns [add/remove]` | 한도 감지에 쓸 커스텀 정규식 패턴 추가/삭제 |
 | `cxs export <파일>` | 전체 계정·설정 백업 (⚠️ 토큰 포함 — 비밀번호처럼 취급) |
 | `cxs restore <파일>` | 백업 파일에서 계정 복원 (다른 PC 이전용) |
