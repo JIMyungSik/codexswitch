@@ -1,6 +1,6 @@
 {
   "name": "@carjms/codexswitch",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Multi-account manager for OpenAI Codex CLI with quota-based rotation (inspired by KarpelesLab/teamclaude)",
   "license": "MIT",
   "repository": {
@@ -11,7 +11,14 @@
   "bugs": {
     "url": "https://github.com/JIMyungSik/codexswitch/issues"
   },
-  "keywords": ["codex", "openai", "cli", "multi-account", "account-switcher", "rotation"],
+  "keywords": [
+    "codex",
+    "openai",
+    "cli",
+    "multi-account",
+    "account-switcher",
+    "rotation"
+  ],
   "publishConfig": {
     "access": "public"
   },
