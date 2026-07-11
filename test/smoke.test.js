@@ -295,6 +295,11 @@ run(['use', 'work-b']);
 r = run(['completion', 'bash']);
 assert.match(r.out, /complete -F _codexswitch codexswitch cxs/);
 
+// --- unknown commands are forwarded to codex (drop-in replacement) ---
+r = run(['goal', 'list']);
+assert.match(r.out, /forwarding to codex: codex goal list/);
+assert.match(r.out, /running codex as/);
+
 // --- disable everything -> exec must fail cleanly ---
 run(['disable', 'a@test.com']);
 run(['disable', 'work-b']);

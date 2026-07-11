@@ -217,6 +217,7 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs export <파일>` | 전체 계정·설정 백업 (⚠️ 토큰 포함 — 비밀번호처럼 취급) |
 | `cxs restore <파일>` | 백업 파일에서 계정 복원 (다른 PC 이전용) |
 | `cxs completion <bash\|zsh>` | 셸 자동완성 스크립트 출력 |
+| `cxs <그 외 명령>` | codex로 그대로 전달 — `cxs resume`, `cxs goal ...`, `cxs apply` 등 codex의 모든 명령을 관리 계정으로 바로 사용 가능 |
 | `cxs remove <이름>` | 계정 삭제 |
 | `cxs rename <옛이름> <새이름>` | 계정 이름 변경 |
 | `cxs disable / enable <이름>` | 로테이션에서 임시 제외 / 복귀 |

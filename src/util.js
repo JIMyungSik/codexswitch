@@ -89,10 +89,12 @@ function fmtRemaining(untilTs) {
 }
 
 function table(rows, headers) {
+  const { visible, dim } = require('./ui.js');
   const all = [headers, ...rows].map((r) => r.map((c) => String(c == null ? '-' : c)));
-  const widths = headers.map((_, i) => Math.max(...all.map((r) => r[i].length)));
-  const line = (r) => r.map((c, i) => c.padEnd(widths[i])).join('  ').trimEnd();
-  return [line(all[0]), line(widths.map((w) => '-'.repeat(w))), ...all.slice(1).map(line)].join('\n');
+  const widths = headers.map((_, i) => Math.max(...all.map((r) => visible(r[i]).length)));
+  const pad = (c, w) => c + ' '.repeat(Math.max(0, w - visible(c).length));
+  const line = (r) => r.map((c, i) => pad(c, widths[i])).join('  ').trimEnd();
+  return [dim(line(all[0])), dim(line(widths.map((w) => '-'.repeat(w)))), ...all.slice(1).map(line)].join('\n');
 }
 
 module.exports = {

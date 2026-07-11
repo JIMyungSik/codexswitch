@@ -6,6 +6,7 @@ const path = require('path');
 const { readJSONSafe, writeJSONAtomic, authInfo, ensureDir, fmtDate, fmtRemaining, table } = require('./util.js');
 const store = require('./store.js');
 const runner = require('./runner.js');
+const ui = require('./ui.js');
 
 const HELP = `codexswitch — multi-account manager for the OpenAI Codex CLI
 
@@ -48,6 +49,10 @@ Maintenance
   completion <bash|zsh>   print a shell completion script
   help                    show this help
 
+Anything else is forwarded to codex under the managed account, so commands
+like "codexswitch resume", "codexswitch goal ..." or "codexswitch apply"
+work exactly like their codex counterparts.
+
 Environment
   CODEX_SWITCH_HOME       data dir (default ~/.codex-switch)
   CODEX_HOME              codex config dir codexswitch manages (default ~/.codex)
@@ -84,7 +89,7 @@ function storeAccount(name, auth) {
   delete meta.accounts[name].disabled;
   delete meta.accounts[name].limitedUntil;
   store.saveMeta(meta);
-  out(`${existed ? 'updated' : 'added'} account "${name}"${info.email ? ` (${info.email}, ${info.plan || 'unknown plan'})` : ''}`);
+  out(ui.ok(`${existed ? 'updated' : 'added'} account ${ui.bold(`"${name}"`)}${info.email ? ui.dim(` (${info.email}, ${info.plan || 'unknown plan'})`) : ''}`));
   return name;
 }
 
@@ -107,7 +112,7 @@ function cmdLogin(args) {
   store.ensureDirs();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codexswitch-login-'));
   try {
-    out('opening codex login in an isolated profile (your current account is untouched)...');
+    out(ui.info('opening codex login in an isolated profile (your current account is untouched)...'));
     const r = runner.spawnCodexSync(['login'], {
       env: { ...process.env, CODEX_HOME: tmp },
       stdio: 'inherit',
@@ -136,30 +141,34 @@ function cmdList() {
   }
   const now = Date.now();
   const meta = store.loadMeta();
-  const pct = (win) => (win && typeof win.pct === 'number' ? `${Math.round(win.pct)}%` : '-');
+  const pct = (win, threshold) => {
+    if (!win || typeof win.pct !== 'number') return ui.dim('-');
+    const v = `${Math.round(win.pct)}%`;
+    return win.pct >= threshold ? ui.red(v) : win.pct >= 70 ? ui.yellow(v) : ui.green(v);
+  };
   const rows = accounts.map((a) => {
     const over = store.overThreshold(a, meta, now);
     const status = a.disabled
-      ? 'disabled'
+      ? ui.red('disabled')
       : a.limitedUntil && a.limitedUntil > now
-        ? `limited ${fmtRemaining(a.limitedUntil)}`
+        ? ui.yellow(`limited ${fmtRemaining(a.limitedUntil)}`)
         : over
-          ? `over-${over}`
-          : 'ok';
+          ? ui.yellow(`over-${over}`)
+          : ui.green('ok');
     return [
-      a.active ? '*' : '',
-      a.name,
-      a.email,
+      a.active ? ui.green('●') : '',
+      a.active ? ui.bold(a.name) : a.name,
+      ui.dim(a.email || '-'),
       a.plan,
       a.priority,
       status,
-      pct(a.usage && a.usage.p5h),
-      pct(a.usage && a.usage.weekly),
-      fmtDate(a.lastRefresh),
+      pct(a.usage && a.usage.p5h, meta.threshold5h),
+      pct(a.usage && a.usage.weekly, meta.thresholdWeekly),
+      ui.dim(fmtDate(a.lastRefresh)),
     ];
   });
   out(table(rows, ['', 'name', 'email', 'plan', 'prio', 'status', '5h', 'week', 'token refreshed']));
-  out(`(rotate threshold: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}% — change with "codexswitch threshold")`);
+  out(ui.dim(`(rotate threshold: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}% — change with "codexswitch threshold")`));
 }
 
 function cmdUse(args) {
@@ -175,7 +184,7 @@ function cmdUse(args) {
   meta.accounts[name].lastUsed = Date.now();
   store.saveMeta(meta);
   const info = authInfo(auth);
-  out(`now using "${name}"${info.email ? ` (${info.email}, ${info.plan || 'unknown plan'})` : ''}`);
+  out(ui.ok(`now using ${ui.bold(`"${name}"`)}${info.email ? ui.dim(` (${info.email}, ${info.plan || 'unknown plan'})`) : ''}`));
 }
 
 function cmdCurrent() {
@@ -192,9 +201,9 @@ function cmdCurrent() {
     (info.email && accounts.find((a) => a.email === info.email)) ||
     accounts.find((a) => a.accountId === info.accountId);
   const name = match ? match.name : '(not stored — run "codexswitch import")';
-  const note = meta.active && match && meta.active !== match.name ? ` (meta says "${meta.active}" — out of sync)` : '';
-  out(`active: ${name}${note}`);
-  out(`  email: ${info.email || '-'}\n  plan:  ${info.plan || '-'}\n  token refreshed: ${fmtDate(info.lastRefresh)}`);
+  const note = meta.active && match && meta.active !== match.name ? ui.yellow(` (meta says "${meta.active}" — out of sync)`) : '';
+  out(`active: ${ui.bold(name)}${note}`);
+  out(ui.dim(`  email: ${info.email || '-'}\n  plan:  ${info.plan || '-'}\n  token refreshed: ${fmtDate(info.lastRefresh)}`));
 }
 
 function cmdNext() {
@@ -468,7 +477,7 @@ async function cmdRun(args) {
   } else if (meta.model && rest.length === 0) {
     rest = ['-m', meta.model];
   }
-  out(`[codexswitch] running codex as "${name}"`);
+  out(ui.info(`running codex as ${ui.bold(`"${name}"`)}`));
   const startTs = Date.now();
   const res = await runner.runCodex(name, rest);
   runner.recordUsage(name, res.profile, startTs);
@@ -511,7 +520,7 @@ async function cmdExec(args) {
     }
     tried.push(name);
     console.error(
-      `[codexswitch] exec as "${name}"${attempt > 0 ? ` (attempt ${attempt + 1}${useResume ? ', resuming session' : ''})` : ''}`
+      ui.info(`exec as ${ui.bold(`"${name}"`)}${ui.dim(attempt > 0 ? ` (attempt ${attempt + 1}${useResume ? ', resuming session' : ''})` : '')}`)
     );
     // On rotation, continue the same session with the next account instead
     // of restarting the whole prompt — the session files are shared.
@@ -523,6 +532,7 @@ async function cmdExec(args) {
     runner.recordUsage(name, res.profile, startTs);
     if (res.code === 0) {
       store.clearLimited(name);
+      console.error(ui.ok(`done as ${ui.bold(`"${name}"`)}`));
       warnIfOverThreshold(name);
       return 0;
     }
@@ -533,7 +543,7 @@ async function cmdExec(args) {
         useResume = true;
       }
       console.error(
-        `[codexswitch] "${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating${useResume ? ' and resuming the session' : ''}`
+        ui.warn(`"${name}" hit a usage/rate limit (paused until ${fmtDate(until)}) — rotating${useResume ? ' and resuming the session' : ''}`)
       );
       continue;
     }
@@ -542,13 +552,13 @@ async function cmdExec(args) {
       // rotation and keep the task going on the next one.
       setFlag(name, { disabled: true });
       console.error(
-        `[codexswitch] "${name}" has a revoked/invalid login — disabled. Fix it with: codexswitch login ${name}`
+        ui.fail(`"${name}" has a revoked/invalid login — disabled. Fix it with: ${ui.bold(`codexswitch login ${name}`)}`)
       );
       continue;
     }
     return res.code; // real failure, don't burn other accounts on it
   }
-  console.error('[codexswitch] all accounts are rate-limited, over threshold, or disabled');
+  console.error(ui.fail('all accounts are rate-limited, over threshold, or disabled'));
   return 2;
 }
 
@@ -560,7 +570,7 @@ function warnIfOverThreshold(name) {
   if (blocked) {
     const pct = blocked === '5h' ? account.usage.p5h.pct : account.usage.weekly.pct;
     console.error(
-      `[codexswitch] "${name}" is at ${Math.round(pct)}% of its ${blocked} limit (threshold ${blocked === '5h' ? meta.threshold5h : meta.thresholdWeekly}%) — the next exec will rotate to another account`
+      ui.warn(`"${name}" is at ${Math.round(pct)}% of its ${blocked} limit (threshold ${blocked === '5h' ? meta.threshold5h : meta.thresholdWeekly}%) — the next exec will rotate to another account`)
     );
   }
 }
@@ -572,7 +582,12 @@ async function main(argv) {
     case 'help':
     case '--help':
     case '-h':
-      out(HELP);
+      out(
+        HELP.replace(/^(codexswitch)(?= —)/, ui.bold('$1')).replace(
+          /^(Accounts|Running codex|Settings|Maintenance|Environment)$/gm,
+          (s) => ui.bold(ui.cyan(s))
+        )
+      );
       return 0;
     case 'login':
       return cmdLogin(args), 0;
@@ -638,7 +653,10 @@ async function main(argv) {
     case 'exec':
       return cmdExec(args);
     default:
-      throw new Error(`unknown command "${cmd}" (see "codexswitch help")`);
+      // Forward everything else to codex under the managed account, so
+      // codexswitch is a drop-in replacement: "cxs goal", "cxs resume", ...
+      console.error(ui.info(ui.dim(`forwarding to codex: codex ${argv.join(' ')}`)));
+      return cmdRun(argv);
   }
 }
 

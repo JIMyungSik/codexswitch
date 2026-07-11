@@ -219,6 +219,7 @@ cxs list                # per-account 5h/week usage columns
 | `cxs export <file>` | Back up all accounts + settings (⚠️ contains tokens — treat like a password) |
 | `cxs restore <file>` | Restore accounts from a backup (for moving machines) |
 | `cxs completion <bash\|zsh>` | Print a shell completion script |
+| `cxs <anything else>` | Forwarded to codex under the managed account — `cxs resume`, `cxs goal ...`, `cxs apply` all work like their codex counterparts |
 | `cxs remove <name>` | Delete an account |
 | `cxs rename <old> <new>` | Rename an account |
 | `cxs disable / enable <name>` | Temporarily exclude from / restore to rotation |
