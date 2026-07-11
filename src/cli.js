@@ -772,6 +772,14 @@ async function cmdExec(args) {
   if (explicit && !store.accountExists(explicit)) throw new Error(`no such account: ${explicit}`);
   if (rest[0] === 'resume') allowResume = false; // user drives resume themselves
 
+  // A prompt like "- item one ..." would be parsed as an option by codex;
+  // if the last argument starts with "-" but contains whitespace it can only
+  // be a prompt, so protect it with a "--" separator.
+  if (!rest.includes('--')) {
+    const last = rest[rest.length - 1];
+    if (last && /^-/.test(last) && /\s/.test(last)) rest.splice(rest.length - 1, 0, '--');
+  }
+
   store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
   const meta = store.loadMeta();
   const total = store.listAccounts().length;
@@ -795,7 +803,7 @@ async function cmdExec(args) {
     // On rotation, continue the same session with the next account instead
     // of restarting the whole prompt — the session files are shared.
     const codexArgs = useResume
-      ? ['exec', 'resume', '--last', ...buildExecArgs([], meta), RESUME_PROMPT]
+      ? ['exec', 'resume', '--last', ...buildExecArgs([], meta), '--', RESUME_PROMPT]
       : ['exec', ...buildExecArgs(rest, meta)];
     const startTs = Date.now();
     const res = await runner.runCodex(name, codexArgs, { capture: true });
@@ -900,7 +908,9 @@ async function cmdChat() {
       continue;
     }
 
-    const code = await cmdExec(inSession ? ['resume', '--last', line] : [line]);
+    // "--" marks the prompt as positional so lines starting with "-" are
+    // never parsed as codex options.
+    const code = await cmdExec(inSession ? ['resume', '--last', '--', line] : ['--', line]);
     if (code === 0) inSession = true;
     else if (code === 2) out(ui.fail('all accounts exhausted — try again later or /use a specific account'));
   }

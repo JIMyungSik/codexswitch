@@ -87,6 +87,17 @@ if (cmd === 'exec') {
     auth.last_refresh = '2026-02-02T00:00:00Z'; // simulate a token refresh
     fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(auth));
   }
+  // like real codex (clap): any unknown dash-argument before "--" is fatal
+  const sepIdx = process.argv.indexOf('--');
+  const KNOWN = ['--skip-git-repo-check', '--last', '-m'];
+  for (let i = 3; i < (sepIdx === -1 ? process.argv.length : sepIdx); i++) {
+    const arg = process.argv[i];
+    if (process.argv[i - 1] === '-m') continue; // model value
+    if (arg.startsWith('-') && !KNOWN.includes(arg) && arg !== 'resume') {
+      console.error("error: unexpected argument '" + arg + "' found");
+      process.exit(2);
+    }
+  }
   console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model);
   process.exit(0);
 }
@@ -319,6 +330,14 @@ assert.match(r.out, /codexswitch chat/);
 assert.match(r.out, /EXEC_OK acc-b/); // turn 1: fresh exec
 assert.match(r.out, /RESUME_OK acc-b/); // turn 2: resumed session
 assert.match(r.out, /rotation would pick/); // /usage worked inside chat
+// prompts starting with "-" must not be parsed as codex options
+r = run(['chat'], { input: '- Recyclespot: fix numbers\n- second dashed turn\n/quit\n' });
+assert.match(r.out, /EXEC_OK acc-b/);
+assert.match(r.out, /RESUME_OK acc-b/);
+assert.ok(!/unexpected argument/.test(r.out), 'dash prompt must be protected by --');
+r = run(['exec', '- dashed prompt here']);
+assert.match(r.out, /EXEC_OK acc-b/);
+
 // chat rotation: account a limit-fails mid-conversation, b resumes the turn
 run(['order', 'a@test.com', 'work-b']);
 run(['clear-limit', 'a@test.com']);
