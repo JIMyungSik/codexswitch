@@ -34,6 +34,10 @@ Accounts
   clear-limit <name>      forget a recorded rate-limit for an account
 
 Running codex
+  chat                    interactive prompt loop (Claude Code-style): each turn
+                          runs through rotation and resumes the same session,
+                          so the conversation survives account switches
+                          (/usage /use /next /model /new /quit inside)
   run [name] [args...]    run codex as <name> (or active account) in an isolated
                           per-account CODEX_HOME; config/sessions are shared
   exec [args...]          run "codex exec ..." and auto-rotate through accounts in
@@ -360,8 +364,42 @@ function cmdModel(args) {
   out(`default model set to "${meta.model}" (applied to run/exec)`);
 }
 
-// Per-account usage dashboard: gauge bars for the 5h / weekly windows with
-// reset countdowns, based on what codex recorded in its session files.
+// Render the per-account usage view (gauge bars for the 5h / weekly windows
+// with reset countdowns). `cursor` marks the selected row in watch mode.
+function usageLines(accounts, meta, { cursor = -1 } = {}) {
+  const now = Date.now();
+  const lines = [];
+  const bar = (pct, threshold) => {
+    const width = 20;
+    const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+    const paint = pct >= threshold ? ui.red : pct >= 70 ? ui.yellow : ui.green;
+    return `[${paint('█'.repeat(filled))}${ui.dim('░'.repeat(width - filled))}]`;
+  };
+  const gauge = (label, win, threshold) => {
+    if (!win || typeof win.pct !== 'number') return `  ${label} ${ui.dim('no data')}`;
+    const pct = Math.round(win.pct);
+    const reset = win.resetAt && win.resetAt > now ? ` resets in ${fmtRemaining(win.resetAt)}` : '';
+    const overMark = win.pct >= threshold ? ` ${ui.red(`≥ threshold ${threshold}%`)}` : '';
+    return `  ${label} ${bar(win.pct, threshold)} ${String(pct).padStart(3)}%${ui.dim(reset)}${overMark}`;
+  };
+  accounts.forEach((a, i) => {
+    const sel = i === cursor ? ui.cyan('▶') : ' ';
+    const mark = a.active ? ui.green('●') : ' ';
+    const state = a.disabled ? ui.red(' [disabled]') : a.limitedUntil && a.limitedUntil > now ? ui.yellow(` [limited ${fmtRemaining(a.limitedUntil)}]`) : '';
+    lines.push(`${cursor >= 0 ? sel : ''}${mark} ${ui.bold(a.name)}${ui.dim(` (${a.plan || a.email || '-'})`)}${state}`);
+    if (!a.usage) {
+      lines.push(ui.dim('  no usage data yet — codex records it during runs (try "codexswitch run" once)'));
+    } else {
+      lines.push(gauge('5h    ', a.usage.p5h, meta.threshold5h));
+      lines.push(gauge('weekly', a.usage.weekly, meta.thresholdWeekly));
+      if (a.usage.at) lines.push(ui.dim(`  measured ${fmtDate(a.usage.at)}`));
+    }
+  });
+  const next = store.pickAccount();
+  lines.push(ui.dim(`\nrotation would pick: ${next ? next.name : '(none usable)'} · threshold 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`));
+  return lines;
+}
+
 function cmdUsage(args) {
   const meta = store.loadMeta();
   let accounts = store.listAccounts();
@@ -373,34 +411,7 @@ function cmdUsage(args) {
     out('no accounts yet — add one with "codexswitch login" or "codexswitch import"');
     return;
   }
-  const now = Date.now();
-  const bar = (pct, threshold) => {
-    const width = 20;
-    const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
-    const paint = pct >= threshold ? ui.red : pct >= 70 ? ui.yellow : ui.green;
-    return `[${paint('█'.repeat(filled))}${ui.dim('░'.repeat(width - filled))}]`;
-  };
-  const line = (label, win, threshold) => {
-    if (!win || typeof win.pct !== 'number') return `  ${label} ${ui.dim('no data')}`;
-    const pct = Math.round(win.pct);
-    const reset = win.resetAt && win.resetAt > now ? ` resets in ${fmtRemaining(win.resetAt)}` : '';
-    const overMark = win.pct >= threshold ? ` ${ui.red(`≥ threshold ${threshold}%`)}` : '';
-    return `  ${label} ${bar(win.pct, threshold)} ${String(pct).padStart(3)}%${ui.dim(reset)}${overMark}`;
-  };
-  for (const a of accounts) {
-    const mark = a.active ? ui.green('●') : ' ';
-    const state = a.disabled ? ui.red(' [disabled]') : a.limitedUntil && a.limitedUntil > now ? ui.yellow(` [limited ${fmtRemaining(a.limitedUntil)}]`) : '';
-    out(`${mark} ${ui.bold(a.name)}${ui.dim(` (${a.plan || a.email || '-'})`)}${state}`);
-    if (!a.usage) {
-      out(ui.dim('  no usage data yet — codex records it during runs (try "codexswitch run" once)'));
-    } else {
-      out(line('5h    ', a.usage.p5h, meta.threshold5h));
-      out(line('weekly', a.usage.weekly, meta.thresholdWeekly));
-      if (a.usage.at) out(ui.dim(`  measured ${fmtDate(a.usage.at)}`));
-    }
-  }
-  const next = store.pickAccount();
-  out(ui.dim(`\nrotation would pick: ${next ? next.name : '(none usable)'} · threshold 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`));
+  for (const l of usageLines(accounts, meta)) out(l);
 }
 
 // Warm up quota measurements: send a minimal request per account so the
@@ -417,30 +428,36 @@ async function cmdProbe(args) {
   out(ui.info(ui.dim(`probing ${accounts.length} account(s) with a minimal request...`)));
   let failures = 0;
   for (const a of accounts) {
-    const startTs = Date.now();
-    const res = await runner.runCodex(
-      a.name,
-      ['exec', ...buildExecArgs(['Reply with exactly: ok'], meta)],
-      { capture: true, silent: true }
-    );
-    const usage = runner.recordUsage(a.name, res.profile, startTs);
-    if (res.code !== 0) {
-      failures++;
-      const why = runner.looksAuthFailed(res.output)
-        ? `login revoked — fix with "codexswitch login ${a.name}"`
-        : runner.looksRateLimited(res.output, meta.limitPatterns)
-          ? 'rate limited'
-          : `exit ${res.code}`;
-      out(ui.fail(`${a.name}: ${why}`));
-      store.logEvent('probe', `${a.name} failed: ${why}`);
-    } else if (usage && usage.p5h) {
-      out(ui.ok(`${a.name}: 5h ${Math.round(usage.p5h.pct)}%${usage.weekly ? ` / weekly ${Math.round(usage.weekly.pct)}%` : ''}`));
-      store.logEvent('probe', `${a.name} measured`);
-    } else {
-      out(ui.warn(`${a.name}: reachable, but codex reported no usage data`));
-    }
+    const line = await probeOne(a, meta);
+    out(line.text);
+    if (!line.ok) failures++;
   }
   return failures > 0 ? 1 : 0;
+}
+
+// Probe a single account; returns a printable result line.
+async function probeOne(a, meta) {
+  const startTs = Date.now();
+  const res = await runner.runCodex(
+    a.name,
+    ['exec', ...buildExecArgs(['Reply with exactly: ok'], meta)],
+    { capture: true, silent: true }
+  );
+  const usage = runner.recordUsage(a.name, res.profile, startTs);
+  if (res.code !== 0) {
+    const why = runner.looksAuthFailed(res.output)
+      ? `login revoked — fix with "codexswitch login ${a.name}"`
+      : runner.looksRateLimited(res.output, meta.limitPatterns)
+        ? 'rate limited'
+        : `exit ${res.code}`;
+    store.logEvent('probe', `${a.name} failed: ${why}`);
+    return { ok: false, text: ui.fail(`${a.name}: ${why}`) };
+  }
+  store.logEvent('probe', `${a.name} measured`);
+  if (usage && usage.p5h) {
+    return { ok: true, text: ui.ok(`${a.name}: 5h ${Math.round(usage.p5h.pct)}%${usage.weekly ? ` / weekly ${Math.round(usage.weekly.pct)}%` : ''}`) };
+  }
+  return { ok: true, text: ui.warn(`${a.name}: reachable, but codex reported no usage data`) };
 }
 
 function cmdLog(args) {
@@ -458,35 +475,81 @@ function cmdLog(args) {
   }
 }
 
-// Live dashboard: re-renders the usage view every few seconds until "q".
+// Live interactive dashboard: usage gauges + recent activity, refreshed
+// every 5s. Keyboard: up/down select, s switch, e enable/disable, p probe,
+// r refresh, q quit.
 async function cmdWatch() {
   if (!process.stdout.isTTY) {
     cmdUsage([]);
     return 0;
   }
+  let cursor = 0;
+  let message = '';
+  let busy = false;
   const render = () => {
+    const meta = store.loadMeta();
+    const accounts = store.listAccounts();
+    if (cursor >= accounts.length) cursor = Math.max(0, accounts.length - 1);
     process.stdout.write('\x1b[2J\x1b[H');
-    out(`${ui.bold('codexswitch watch')}${ui.dim(`  ${new Date().toLocaleTimeString()} · refreshes every 5s · q to quit`)}\n`);
-    cmdUsage([]);
-    const events = store.readEvents(5);
+    out(`${ui.bold('codexswitch watch')}${ui.dim(`  ${new Date().toLocaleTimeString()} \u00b7 refreshes every 5s`)}\n`);
+    if (accounts.length === 0) {
+      out('no accounts yet \u2014 add one with "codexswitch login"');
+    } else {
+      for (const l of usageLines(accounts, meta, { cursor })) out(l);
+    }
+    const events = store.readEvents(4);
     if (events.length > 0) {
       out(ui.dim('\nrecent activity:'));
       for (const e of events) out(ui.dim(`  ${e.at.replace('T', ' ').slice(11, 19)}  ${e.type}: ${e.message}`));
     }
+    out(`\n${ui.dim('keys:')} ${ui.cyan('\u2191/\u2193')} select  ${ui.cyan('s')} switch  ${ui.cyan('e')} enable/disable  ${ui.cyan('p')} probe  ${ui.cyan('r')} refresh  ${ui.cyan('q')} quit`);
+    if (message) out(message);
   };
   render();
-  const timer = setInterval(render, 5000);
+  const timer = setInterval(() => {
+    if (!busy) render();
+  }, 5000);
   await new Promise((resolve) => {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdin.on('data', (b) => {
+    process.stdin.on('data', async (b) => {
+      if (busy) return;
       const s = b.toString();
+      const accounts = store.listAccounts();
+      const selected = accounts[cursor];
       if (s === 'q' || s === '\u0003') {
         clearInterval(timer);
         if (process.stdin.isTTY) process.stdin.setRawMode(false);
         process.stdin.pause();
         resolve();
+        return;
       }
+      if (s === '\x1b[A' || s === 'k') cursor = Math.max(0, cursor - 1);
+      else if (s === '\x1b[B' || s === 'j') cursor = Math.min(accounts.length - 1, cursor + 1);
+      else if (s === 'r') message = '';
+      else if (s === 's' && selected) {
+        try {
+          cmdUse([selected.name]);
+          message = ui.ok(`switched to "${selected.name}"`);
+        } catch (e) {
+          message = ui.fail(e.message);
+        }
+      } else if (s === 'e' && selected) {
+        setFlag(selected.name, { disabled: !selected.disabled });
+        message = selected.disabled ? ui.ok(`enabled "${selected.name}"`) : ui.warn(`disabled "${selected.name}"`);
+      } else if (s === 'p' && selected) {
+        busy = true;
+        message = ui.dim(`probing "${selected.name}"...`);
+        render();
+        try {
+          const result = await probeOne(selected, store.loadMeta());
+          message = result.text;
+        } catch (e) {
+          message = ui.fail(e.message);
+        }
+        busy = false;
+      }
+      render();
     });
   });
   return 0;
@@ -575,7 +638,7 @@ function cmdNames() {
 }
 
 const COMMANDS =
-  'login import add-key list usage watch probe log use current next run exec order model remove rename ' +
+  'login import add-key list usage watch probe log chat use current next run exec order model remove rename ' +
   'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
 
 function cmdCompletion(args) {
@@ -600,6 +663,18 @@ complete -F _codexswitch codexswitch cxs`;
 // non-git folders, and the configured default model — unless the user
 // already passed their own flags.
 function buildExecArgs(rest, meta) {
+  // "exec resume [--last|<id>] ..." — the subcommand and its target must
+  // stay in front; flags are injected after them.
+  if (rest[0] === 'resume') {
+    const head = ['resume'];
+    let i = 1;
+    if (rest[i] === '--last' || (rest[i] && /^[0-9a-f][0-9a-f-]{7,}$/i.test(rest[i]))) head.push(rest[i++]);
+    return [...head, ...injectExecFlags(rest.slice(i), meta)];
+  }
+  return injectExecFlags(rest, meta);
+}
+
+function injectExecFlags(rest, meta) {
   const args = [...rest];
   if (!args.includes('--skip-git-repo-check')) args.unshift('--skip-git-repo-check');
   const hasModel = args.some((a) => a === '-m' || a === '--model' || a.startsWith('--model='));
@@ -716,6 +791,79 @@ async function cmdExec(args) {
   return 2;
 }
 
+// Interactive chat: a Claude Code-style prompt loop on top of exec.
+// Every turn goes through the rotation engine, and turns 2+ resume the same
+// codex session — so the conversation continues even when the account under
+// it changes between (or during) turns.
+async function cmdChat() {
+  const readline = require('readline');
+  runner.assertCodexAvailable();
+  if (store.listAccounts().length === 0) {
+    throw new Error('no accounts — add one with "codexswitch login"');
+  }
+  const meta = store.loadMeta();
+  out(`${ui.bold('codexswitch chat')} ${ui.dim(`· model ${meta.model || '(codex default)'} · rotation on limits`)}`);
+  out(ui.dim('type a prompt, or /help for commands (/quit to exit)\n'));
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.setPrompt(ui.enabled ? `${ui.cyan('cxs')} ${ui.dim('›')} ` : 'cxs › ');
+  // Buffer lines ourselves: input can arrive while a turn is still running
+  // (type-ahead, piped input) and must not be dropped or hit a closed rl.
+  const pending = [];
+  const waiters = [];
+  let closed = false;
+  rl.on('line', (l) => {
+    const w = waiters.shift();
+    if (w) w(l);
+    else pending.push(l);
+  });
+  rl.on('close', () => {
+    closed = true;
+    for (const w of waiters.splice(0)) w(null);
+  });
+  const ask = () => {
+    if (pending.length > 0) return Promise.resolve(pending.shift());
+    if (closed) return Promise.resolve(null);
+    rl.prompt();
+    return new Promise((resolve) => waiters.push(resolve));
+  };
+
+  let inSession = false;
+  for (;;) {
+    const raw = await ask();
+    if (raw == null) break; // EOF (Ctrl-D or piped input ended)
+    const line = raw.trim();
+    if (!line) continue;
+
+    if (line[0] === '/') {
+      const [cmd, ...rest] = line.slice(1).split(/\s+/);
+      try {
+        if (cmd === 'quit' || cmd === 'exit' || cmd === 'q') break;
+        else if (cmd === 'help')
+          out(ui.dim('/usage /list /use <name> /next /model [m] /new (fresh session) /quit'));
+        else if (cmd === 'usage') cmdUsage([]);
+        else if (cmd === 'list') cmdList();
+        else if (cmd === 'use') cmdUse(rest);
+        else if (cmd === 'next') cmdNext();
+        else if (cmd === 'model') cmdModel(rest);
+        else if (cmd === 'new') {
+          inSession = false;
+          out(ui.ok('starting a fresh session on the next prompt'));
+        } else out(ui.warn(`unknown command /${cmd} — try /help`));
+      } catch (e) {
+        out(ui.fail(e.message));
+      }
+      continue;
+    }
+
+    const code = await cmdExec(inSession ? ['resume', '--last', line] : [line]);
+    if (code === 0) inSession = true;
+    else if (code === 2) out(ui.fail('all accounts exhausted — try again later or /use a specific account'));
+  }
+  rl.close();
+  return 0;
+}
+
 function warnIfOverThreshold(name) {
   const meta = store.loadMeta();
   const account = store.listAccounts().find((a) => a.name === name);
@@ -817,6 +965,9 @@ async function main(argv) {
       return cmdRun(args);
     case 'exec':
       return cmdExec(args);
+    case 'chat':
+    case 'repl':
+      return cmdChat();
     default:
       // Forward everything else to codex under the managed account, so
       // codexswitch is a drop-in replacement: "cxs goal", "cxs resume", ...

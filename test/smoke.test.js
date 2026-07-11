@@ -116,6 +116,7 @@ function run(args, opts = {}) {
   const r = spawnSync(process.execPath, [cli, ...args], {
     env: { ...baseEnv, ...(opts.env || {}) },
     encoding: 'utf8',
+    input: opts.input,
   });
   const res = { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
   if (res.code !== 0 && !opts.allowFail) {
@@ -308,6 +309,22 @@ assert.match(r.out, /complete -F _codexswitch codexswitch cxs/);
 r = run(['goal', 'list']);
 assert.match(r.out, /forwarding to codex: codex goal list/);
 assert.match(r.out, /running codex as/);
+
+// --- chat: prompt loop; turn 1 execs, turn 2 resumes the same session ---
+run(['order', 'work-b', 'a@test.com']);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+r = run(['chat'], { input: 'first turn\nsecond turn\n/usage\n/quit\n' });
+assert.match(r.out, /codexswitch chat/);
+assert.match(r.out, /EXEC_OK acc-b/); // turn 1: fresh exec
+assert.match(r.out, /RESUME_OK acc-b/); // turn 2: resumed session
+assert.match(r.out, /rotation would pick/); // /usage worked inside chat
+// chat rotation: account a limit-fails mid-conversation, b resumes the turn
+run(['order', 'a@test.com', 'work-b']);
+run(['clear-limit', 'a@test.com']);
+r = run(['chat'], { input: 'rotate me\n/quit\n' });
+assert.match(r.out, /hit a usage\/rate limit/);
+assert.match(r.out, /(EXEC|RESUME)_OK acc-b/); // conversation continued on b
 
 // --- probe: warms up gauges silently, reports per-account usage ---
 run(['clear-limit', 'a@test.com']);
