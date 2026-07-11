@@ -51,6 +51,8 @@ Running codex
 
 Settings
   model [name|default]    show/set the default model injected into run/exec
+  reasoning [mode]        how much model reasoning to print during runs:
+                          show (codex default) | concise | hide
   threshold [5h%] [wk%]   rotate early when recorded usage reaches these percents
                           of the 5-hour / weekly window (default 95, one value = both)
   cooldown [minutes]      show/set rate-limit cooldown (default 60)
@@ -642,7 +644,7 @@ function cmdNames() {
 
 const COMMANDS =
   'login import add-key list usage watch probe log chat server use current next run exec order model remove rename ' +
-  'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
+  'enable disable priority clear-limit cooldown threshold reasoning patterns export restore sync completion help';
 
 function cmdCompletion(args) {
   const shell = args[0];
@@ -682,7 +684,40 @@ function injectExecFlags(rest, meta) {
   if (!args.includes('--skip-git-repo-check')) args.unshift('--skip-git-repo-check');
   const hasModel = args.some((a) => a === '-m' || a === '--model' || a.startsWith('--model='));
   if (meta.model && !hasModel) args.unshift('-m', meta.model);
+  args.unshift(...reasoningFlags(meta, args));
   return args;
+}
+
+// -c overrides implementing "cxs reasoning hide|concise|show".
+function reasoningFlags(meta, existing = []) {
+  if (!meta.reasoning || meta.reasoning === 'show') return [];
+  if (existing.some((a) => /hide_agent_reasoning|model_reasoning_summary/.test(a))) return [];
+  if (meta.reasoning === 'hide') return ['-c', 'hide_agent_reasoning=true'];
+  return ['-c', 'model_reasoning_summary=concise']; // 'concise'
+}
+
+function cmdReasoning(args) {
+  const meta = store.loadMeta();
+  if (args[0] == null) {
+    out(`reasoning: ${meta.reasoning || 'show'} ${ui.dim('(show | concise | hide)')}`);
+    return;
+  }
+  const value = args[0];
+  if (!['show', 'concise', 'hide'].includes(value)) {
+    throw new Error('usage: codexswitch reasoning <show|concise|hide>');
+  }
+  if (value === 'show') delete meta.reasoning;
+  else meta.reasoning = value;
+  store.saveMeta(meta);
+  out(
+    ui.ok(
+      value === 'hide'
+        ? 'reasoning output hidden (hide_agent_reasoning=true)'
+        : value === 'concise'
+          ? 'reasoning output shortened (model_reasoning_summary=concise)'
+          : 'reasoning output back to codex default'
+    )
+  );
 }
 
 // EXPERIMENTAL: foreground proxy server for per-request rotation.
@@ -744,8 +779,10 @@ async function cmdRun(args) {
   const meta = store.loadMeta();
   if (rest[0] === 'exec') {
     rest = ['exec', ...buildExecArgs(rest.slice(1), meta)];
-  } else if (meta.model && rest.length === 0) {
-    rest = ['-m', meta.model];
+  } else if (rest.length === 0) {
+    // interactive TUI launch — apply the same defaults
+    if (meta.model) rest = ['-m', meta.model];
+    rest = [...reasoningFlags(meta), ...rest];
   }
   out(ui.info(`running codex as ${ui.bold(`"${name}"`)}${proxyPort ? ui.dim(` via proxy :${proxyPort}`) : ''}`));
   const startTs = Date.now();
@@ -990,6 +1027,8 @@ async function main(argv) {
       return cmdOrder(args), 0;
     case 'model':
       return cmdModel(args), 0;
+    case 'reasoning':
+      return cmdReasoning(args), 0;
     case 'add-key':
     case 'apikey':
       return cmdAddKey(args), 0;

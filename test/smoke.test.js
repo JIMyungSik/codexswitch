@@ -89,16 +89,18 @@ if (cmd === 'exec') {
   }
   // like real codex (clap): any unknown dash-argument before "--" is fatal
   const sepIdx = process.argv.indexOf('--');
-  const KNOWN = ['--skip-git-repo-check', '--last', '-m'];
+  const KNOWN = ['--skip-git-repo-check', '--last', '-m', '-c'];
   for (let i = 3; i < (sepIdx === -1 ? process.argv.length : sepIdx); i++) {
     const arg = process.argv[i];
-    if (process.argv[i - 1] === '-m') continue; // model value
+    if (['-m', '-c'].includes(process.argv[i - 1])) continue; // option values
     if (arg.startsWith('-') && !KNOWN.includes(arg) && arg !== 'resume') {
       console.error("error: unexpected argument '" + arg + "' found");
       process.exit(2);
     }
   }
-  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model);
+  const cfgs = [];
+  process.argv.forEach((a, i2) => { if (a === '-c') cfgs.push(process.argv[i2 + 1]); });
+  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + (cfgs.length ? ' cfg=' + cfgs.join(',') : ''));
   process.exit(0);
 }
 process.exit(0);
@@ -202,6 +204,17 @@ assert.ok(!/rotating/.test(r.out), 'should start with work-b per order, no rotat
 // user-provided -m must win over the stored default
 r = run(['exec', '-m', 'gpt-user-2', 'hello']);
 assert.match(r.out, /model=gpt-user-2/);
+
+// --- reasoning: hide/concise inject -c overrides, show removes them ---
+run(['reasoning', 'hide']);
+r = run(['exec', 'quiet please']);
+assert.match(r.out, /cfg=hide_agent_reasoning=true/);
+run(['reasoning', 'concise']);
+r = run(['exec', 'brief please']);
+assert.match(r.out, /cfg=model_reasoning_summary=concise/);
+run(['reasoning', 'show']);
+r = run(['exec', 'normal again']);
+assert.ok(!/cfg=/.test(r.out), 'show mode must not inject -c overrides');
 
 // --- --no-resume: rotation restarts the prompt instead of resuming ---
 run(['order', 'a@test.com', 'work-b']); // a first, a always limit-fails

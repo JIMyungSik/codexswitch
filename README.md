@@ -220,6 +220,7 @@ cxs list                # per-account 5h/week usage columns
 | `cxs order [names...]` | Pin the rotation order; unlisted accounts rotate by **soonest weekly reset** (use-or-lose) |
 | `cxs model [name]` | Set the default model injected into `run`/`exec` (`default` to reset) |
 | `cxs threshold [5h%] [wk%]` | Rotate to the next account when usage reaches these percents (default 95; one value sets both) |
+| `cxs reasoning <show\|concise\|hide>` | How much model reasoning ("thinking") to print during runs — `hide` for clean output, `concise` for one-line summaries |
 | `cxs patterns [add/remove]` | Custom regex patterns treated as rate-limit errors |
 | `cxs export <file>` | Back up all accounts + settings (⚠️ contains tokens — treat like a password) |
 | `cxs restore <file>` | Restore accounts from a backup (for moving machines) |
