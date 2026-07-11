@@ -223,6 +223,8 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs restore <파일>` | 백업 파일에서 계정 복원 (다른 PC 이전용) |
 | `cxs completion <bash\|zsh>` | 셸 자동완성 스크립트 출력 |
 | `cxs <그 외 명령>` | codex로 그대로 전달 — `cxs resume`, `cxs goal ...`, `cxs apply` 등 codex의 모든 명령을 관리 계정으로 바로 사용 가능 |
+| `cxs server [--port N]` | **실험 기능** 로컬 프록시(teamclaude 방식): 요청마다 인증을 교체하고, 429는 다음 계정으로 재시도, 응답 헤더에서 사용량을 실시간 수집 |
+| `cxs run --proxy [인자]` | codex를 로컬 프록시 경유로 실행 — 대화형 세션 안에서도 요청 단위 로테이션 |
 | `cxs remove <이름>` | 계정 삭제 |
 | `cxs rename <옛이름> <새이름>` | 계정 이름 변경 |
 | `cxs disable / enable <이름>` | 로테이션에서 임시 제외 / 복귀 |

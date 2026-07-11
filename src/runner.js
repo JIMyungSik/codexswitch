@@ -60,9 +60,9 @@ function assertCodexAvailable() {
 // history are shared — except auth.json (per-account, copied from the store)
 // and sqlite databases (excluded: two codex processes writing the same
 // sqlite file through symlinks risks corruption; each profile keeps its own).
-function buildProfile(name) {
+function buildProfile(name, dirName = name) {
   const p = store.paths();
-  const profile = path.join(p.profilesDir, name);
+  const profile = path.join(p.profilesDir, dirName);
   ensureDir(profile);
 
   // Sessions must exist in the real CODEX_HOME before linking, so that every
@@ -106,6 +106,26 @@ function buildProfile(name) {
   const auth = store.readAccountAuth(name);
   const authFile = path.join(profile, 'auth.json');
   fs.writeFileSync(authFile, JSON.stringify(auth, null, 2) + '\n', { mode: 0o600 });
+  return profile;
+}
+
+// Proxy-mode profile: like a normal overlay, but config.toml is a patched
+// copy pointing chatgpt_base_url at the local codexswitch proxy so every
+// codex request flows through it (and rotates per request).
+function buildProxyProfile(name, port) {
+  const p = store.paths();
+  const profile = buildProfile(name, `${name}.proxy`);
+  const cfgDest = path.join(profile, 'config.toml');
+  let cfg = '';
+  try {
+    cfg = fs.readFileSync(path.join(p.codexHome, 'config.toml'), 'utf8');
+  } catch {
+    /* no config yet */
+  }
+  cfg = cfg.replace(/^\s*chatgpt_base_url\s*=.*$/gm, '').trimEnd();
+  cfg += `\n\n# managed by codexswitch proxy mode\nchatgpt_base_url = "http://127.0.0.1:${port}/backend-api/"\n`;
+  fs.rmSync(cfgDest, { force: true });
+  fs.writeFileSync(cfgDest, cfg);
   return profile;
 }
 
@@ -165,9 +185,10 @@ function refreshCopy(target, dest) {
 // capture=false: interactive, stdio inherited. capture=true: stream output
 // through while also collecting it so the caller can detect limit errors.
 // silent=true (with capture): collect without echoing (used by probe).
-function runCodex(name, args, { capture = false, silent = false } = {}) {
+// proxyPort: route the run through the local codexswitch proxy.
+function runCodex(name, args, { capture = false, silent = false, proxyPort = null } = {}) {
   assertCodexAvailable();
-  const profile = buildProfile(name);
+  const profile = proxyPort ? buildProxyProfile(name, proxyPort) : buildProfile(name);
   const env = { ...process.env, CODEX_HOME: profile };
 
   return new Promise((resolve) => {
@@ -321,6 +342,7 @@ module.exports = {
   spawnCodexSync,
   assertCodexAvailable,
   buildProfile,
+  buildProxyProfile,
   runCodex,
   looksRateLimited,
   looksAuthFailed,

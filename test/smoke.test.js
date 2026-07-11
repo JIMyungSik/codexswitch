@@ -32,7 +32,7 @@ function fakeAuth(email, accountId, plan = 'plus', lastRefresh = '2026-01-01T00:
   return {
     auth_mode: 'chatgpt',
     OPENAI_API_KEY: null,
-    tokens: { id_token: fakeJwt(email, accountId, plan), access_token: 'at', refresh_token: 'rt', account_id: accountId },
+    tokens: { id_token: fakeJwt(email, accountId, plan), access_token: `at-${accountId}`, refresh_token: 'rt', account_id: accountId },
     last_refresh: lastRefresh,
   };
 }
@@ -357,18 +357,92 @@ assert.match(r.out, /rotation would pick: a@test\.com/);
 run(['clear-limit', 'a@test.com']);
 run(['clear-limit', 'work-b']);
 
-// --- disable everything -> exec must fail cleanly ---
-run(['disable', 'a@test.com']);
-run(['disable', 'work-b']);
-r = run(['exec', 'x'], { allowFail: true });
-assert.strictEqual(r.code, 2);
-assert.match(r.out, /all accounts are rate-limited, over threshold, or disabled/);
+// --- EXPERIMENTAL proxy: auth swap, 429 rotation, usage from headers ---
+(async () => {
+  const httpMod = require('http');
+  const { spawn } = require('child_process');
 
-// --- remove ---
-run(['enable', 'work-b']);
-run(['remove', 'work-b']);
-r = run(['list']);
-assert.ok(!/work-b/.test(r.out));
+  const upstream = httpMod.createServer((req, res) => {
+    const auth = req.headers.authorization || '';
+    if (auth.includes('at-acc-a')) {
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end('{"error":"rate limit"}');
+      return;
+    }
+    res.writeHead(200, {
+      'x-codex-primary-used-percent': '55',
+      'x-codex-primary-resets-in-seconds': '1200',
+      'x-codex-secondary-used-percent': '22',
+      'x-codex-secondary-resets-in-seconds': '500000',
+      'x-account': req.headers['chatgpt-account-id'] || '',
+    });
+    res.end('UPSTREAM_OK');
+  });
+  await new Promise((r2) => upstream.listen(0, '127.0.0.1', r2));
+  const upPort = upstream.address().port;
+  const proxyPort = 18437 + (process.pid % 1000);
+  const srv = spawn(process.execPath, [cli, 'server', '--port', String(proxyPort)], {
+    env: { ...baseEnv, CODEX_SWITCH_UPSTREAM: `http://127.0.0.1:${upPort}` },
+    stdio: 'ignore',
+  });
+  const ping = () =>
+    new Promise((res2) => {
+      const rq = httpMod.get({ host: '127.0.0.1', port: proxyPort, path: '/__codexswitch' }, (r3) => {
+        r3.resume();
+        res2(r3.statusCode === 200);
+      });
+      rq.on('error', () => res2(false));
+    });
+  let up = false;
+  for (let i = 0; i < 50 && !up; i++) {
+    up = await ping();
+    if (!up) await new Promise((r4) => setTimeout(r4, 100));
+  }
+  assert.ok(up, 'proxy server did not start');
 
-fs.rmSync(root, { recursive: true, force: true });
-console.log('smoke test: all assertions passed');
+  run(['clear-limit', 'a@test.com']);
+  run(['clear-limit', 'work-b']);
+  run(['order', 'a@test.com', 'work-b']); // a first: upstream 429s a -> proxy must rotate to b
+  const resp = await fetch(`http://127.0.0.1:${proxyPort}/backend-api/test`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer client-original', 'chatgpt-account-id': 'client-orig' },
+    body: '{}',
+  });
+  assert.strictEqual(resp.status, 200);
+  assert.strictEqual(await resp.text(), 'UPSTREAM_OK');
+  assert.strictEqual(resp.headers.get('x-account'), 'acc-b'); // auth swapped, rotated to b
+  const m2 = JSON.parse(fs.readFileSync(path.join(switchHome, 'meta.json'), 'utf8'));
+  assert.ok(m2.accounts['a@test.com'].limitedUntil > Date.now(), 'a must be limited after proxy 429');
+  assert.strictEqual(Math.round(m2.accounts['work-b'].usage.p5h.pct), 55); // usage from headers
+
+  // run --proxy: profile config.toml is patched to point at the proxy
+  run(['clear-limit', 'a@test.com']);
+  r = run(['run', '--proxy', 'exec', 'hi']);
+  assert.match(r.out, /via proxy :/);
+  const profs = fs.readdirSync(path.join(switchHome, 'profiles')).filter((d) => d.endsWith('.proxy'));
+  assert.ok(profs.length > 0, 'proxy profile must exist');
+  const cfg = fs.readFileSync(path.join(switchHome, 'profiles', profs[0], 'config.toml'), 'utf8');
+  assert.ok(cfg.includes(`chatgpt_base_url = "http://127.0.0.1:${proxyPort}/backend-api/"`), 'config must be patched');
+
+  srv.kill('SIGTERM');
+  upstream.close();
+
+  // --- disable everything -> exec must fail cleanly ---
+  run(['disable', 'a@test.com']);
+  run(['disable', 'work-b']);
+  r = run(['exec', 'x'], { allowFail: true });
+  assert.strictEqual(r.code, 2);
+  assert.match(r.out, /all accounts are rate-limited, over threshold, or disabled/);
+
+  // --- remove ---
+  run(['enable', 'work-b']);
+  run(['remove', 'work-b']);
+  r = run(['list']);
+  assert.ok(!/work-b/.test(r.out));
+
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log('smoke test: all assertions passed');
+})().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

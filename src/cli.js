@@ -45,6 +45,9 @@ Running codex
                           the same session (--skip-git-repo-check added automatically)
       -a, --account <n>   start exec with a specific account
       --no-resume         restart the prompt instead of resuming on rotation
+  server [--port N]       EXPERIMENTAL local proxy: per-request account
+                          rotation with live usage from response headers
+  run --proxy [args...]   run codex routed through the local proxy
 
 Settings
   model [name|default]    show/set the default model injected into run/exec
@@ -638,7 +641,7 @@ function cmdNames() {
 }
 
 const COMMANDS =
-  'login import add-key list usage watch probe log chat use current next run exec order model remove rename ' +
+  'login import add-key list usage watch probe log chat server use current next run exec order model remove rename ' +
   'enable disable priority clear-limit cooldown threshold patterns export restore sync completion help';
 
 function cmdCompletion(args) {
@@ -682,8 +685,49 @@ function injectExecFlags(rest, meta) {
   return args;
 }
 
+// EXPERIMENTAL: foreground proxy server for per-request rotation.
+async function cmdServer(args) {
+  const proxy = require('./proxy.js');
+  let port = proxy.DEFAULT_PORT;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port' || args[i] === '-p') port = parseInt(args[++i], 10);
+  }
+  if (Number.isNaN(port) || port < 1 || port > 65535) throw new Error('invalid port');
+  if (store.listAccounts().length === 0) throw new Error('no accounts — add one with "codexswitch login"');
+  const log = (type, msg) => {
+    const paint = { rotate: ui.warn, error: ui.fail, ws: ui.info, req: (s) => ui.dim(`  ${s}`) }[type] || ui.info;
+    out(paint(msg));
+  };
+  const server = await proxy.startServer({ port, log });
+  const stateFile = path.join(store.paths().home, 'proxy.json');
+  writeJSONAtomic(stateFile, { port, pid: process.pid, startedAt: Date.now() });
+  out(`${ui.bold('codexswitch proxy')} ${ui.yellow('(experimental)')} listening on ${ui.cyan(`http://127.0.0.1:${port}`)}`);
+  out(ui.dim('per-request account rotation · 429 retries on the next account · live usage from response headers'));
+  out(ui.dim(`use it with:  codexswitch run --proxy    (Ctrl-C to stop)\n`));
+  await new Promise((resolve) => {
+    const stop = () => {
+      server.close();
+      fs.rmSync(stateFile, { force: true });
+      resolve();
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  return 0;
+}
+
 async function cmdRun(args) {
   store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
+  let proxyPort = null;
+  if (args.includes('--proxy')) {
+    const proxy = require('./proxy.js');
+    args = args.filter((a) => a !== '--proxy');
+    const state = readJSONSafe(path.join(store.paths().home, 'proxy.json'));
+    proxyPort = (state && state.port) || proxy.DEFAULT_PORT;
+    if (!(await proxy.ping(proxyPort))) {
+      throw new Error(`no proxy on port ${proxyPort} — start it first with "codexswitch server"`);
+    }
+  }
   let name = null;
   let rest = args;
   if (args[0] && store.accountExists(args[0])) {
@@ -703,9 +747,9 @@ async function cmdRun(args) {
   } else if (meta.model && rest.length === 0) {
     rest = ['-m', meta.model];
   }
-  out(ui.info(`running codex as ${ui.bold(`"${name}"`)}`));
+  out(ui.info(`running codex as ${ui.bold(`"${name}"`)}${proxyPort ? ui.dim(` via proxy :${proxyPort}`) : ''}`));
   const startTs = Date.now();
-  const res = await runner.runCodex(name, rest);
+  const res = await runner.runCodex(name, rest, { proxyPort });
   runner.recordUsage(name, res.profile, startTs);
   return res.code;
 }
@@ -968,6 +1012,9 @@ async function main(argv) {
     case 'chat':
     case 'repl':
       return cmdChat();
+    case 'server':
+    case 'proxy':
+      return cmdServer(args);
     default:
       // Forward everything else to codex under the managed account, so
       // codexswitch is a drop-in replacement: "cxs goal", "cxs resume", ...

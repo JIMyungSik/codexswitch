@@ -225,6 +225,8 @@ cxs list                # per-account 5h/week usage columns
 | `cxs restore <file>` | Restore accounts from a backup (for moving machines) |
 | `cxs completion <bash\|zsh>` | Print a shell completion script |
 | `cxs <anything else>` | Forwarded to codex under the managed account — `cxs resume`, `cxs goal ...`, `cxs apply` all work like their codex counterparts |
+| `cxs server [--port N]` | **EXPERIMENTAL** local proxy (teamclaude-style): swaps credentials per request, retries 429s on the next account, and feeds usage gauges live from response headers |
+| `cxs run --proxy [args]` | Run codex routed through the local proxy — per-request rotation even inside interactive sessions |
 | `cxs remove <name>` | Delete an account |
 | `cxs rename <old> <new>` | Rename an account |
 | `cxs disable / enable <name>` | Temporarily exclude from / restore to rotation |
