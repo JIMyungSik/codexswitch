@@ -89,11 +89,37 @@ function fmtRemaining(untilTs) {
   return h > 0 ? `${h}h${m}m` : `${m}m`;
 }
 
+// Terminal columns are not the same as JavaScript string length: Korean,
+// Japanese, Chinese and emoji commonly occupy two columns. Keeping this
+// small and dependency-free is sufficient for account names and table data.
+function displayWidth(value) {
+  const text = require('./ui.js').visible(String(value));
+  let width = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    // Combining marks and variation selectors do not advance the cursor.
+    if (/\p{Mark}/u.test(ch) || (cp >= 0xfe00 && cp <= 0xfe0f)) continue;
+    const wide =
+      cp >= 0x1100 &&
+      (cp <= 0x115f ||
+        cp === 0x2329 || cp === 0x232a ||
+        (cp >= 0x2e80 && cp <= 0xa4cf) ||
+        (cp >= 0xac00 && cp <= 0xd7a3) ||
+        (cp >= 0xf900 && cp <= 0xfaff) ||
+        (cp >= 0xfe10 && cp <= 0xfe6f) ||
+        (cp >= 0xff00 && cp <= 0xff60) ||
+        (cp >= 0x1f300 && cp <= 0x1faff) ||
+        (cp >= 0x20000 && cp <= 0x3fffd));
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
 function table(rows, headers) {
-  const { visible, dim } = require('./ui.js');
+  const { dim } = require('./ui.js');
   const all = [headers, ...rows].map((r) => r.map((c) => String(c == null ? '-' : c)));
-  const widths = headers.map((_, i) => Math.max(...all.map((r) => visible(r[i]).length)));
-  const pad = (c, w) => c + ' '.repeat(Math.max(0, w - visible(c).length));
+  const widths = headers.map((_, i) => Math.max(...all.map((r) => displayWidth(r[i]))));
+  const pad = (c, w) => c + ' '.repeat(Math.max(0, w - displayWidth(c)));
   const line = (r) => r.map((c, i) => pad(c, widths[i])).join('  ').trimEnd();
   return [dim(line(all[0])), dim(line(widths.map((w) => '-'.repeat(w)))), ...all.slice(1).map(line)].join('\n');
 }
@@ -108,5 +134,6 @@ module.exports = {
   parseDurationMs,
   fmtDate,
   fmtRemaining,
+  displayWidth,
   table,
 };

@@ -205,7 +205,7 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs add-key <이름> [키]` | OpenAI API 키 계정 등록 (키 생략 시 `$OPENAI_API_KEY` 사용) |
 | `cxs list` | 계정 목록: 활성 표시, 이메일, 플랜, 우선순위, 한도 상태, 사용량 % |
 | `cxs usage [이름]` | 계정별 사용량 대시보드: 5시간/주간 게이지 바, 리셋 카운트다운, 다음 로테이션 계정 (별칭: `status`) |
-| `cxs chat` | **대화형 입력창 (Claude Code 스타일)**: 매 턴이 로테이션을 거치고 같은 codex 세션을 이어가므로, 계정이 바뀌어도 대화가 유지됨. 내부 명령: `/usage /use /next /model /new /quit` |
+| `cxs chat` | **대화형 입력창 (Claude Code 스타일)**: 매 턴마다 계정·세션·추론 모드를 표시하고, 계정이 바뀌어도 대화가 유지됨. `/paste`로 여러 줄 입력(`/end`로 완료). 내부 명령: `/status /usage /use /next /model /reasoning /new /quit` |
 | `cxs watch` | 실시간 인터랙티브 대시보드 — 5초마다 갱신; 키: `↑/↓` 선택, `s` 전환, `e` 활성/비활성, `p` 프로브, `q` 종료 |
 | `cxs probe [이름]` | 계정마다 최소 요청 1회를 보내 사용량 게이지 워밍업 (토큰 소량 소모) |
 | `cxs log [개수]` | 최근 활동 기록: 계정 전환, 한도 도달, 로테이션, 프로브 |

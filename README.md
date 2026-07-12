@@ -207,7 +207,7 @@ cxs list                # per-account 5h/week usage columns
 | `cxs add-key <name> [key]` | Register an OpenAI API-key account (falls back to `$OPENAI_API_KEY`) |
 | `cxs list` | List accounts: active marker, email, plan, priority, limit status, usage % |
 | `cxs usage [name]` | Per-account usage dashboard: 5h/weekly gauge bars, reset countdowns, next rotation pick (alias: `status`) |
-| `cxs chat` | **Interactive prompt loop (Claude Code-style)**: each turn runs through rotation and resumes the same codex session, so the conversation survives account switches. Slash commands inside: `/usage /use /next /model /new /quit` |
+| `cxs chat` | **Interactive prompt loop (Claude Code-style)**: every turn shows account, session, and reasoning state; conversation survives account switches. Use `/paste` for multiline input (`/end` to submit). Commands: `/status /usage /use /next /model /reasoning /new /quit` |
 | `cxs watch` | Live interactive dashboard — refreshes every 5s; keys: `↑/↓` select, `s` switch, `e` enable/disable, `p` probe, `q` quit |
 | `cxs probe [name]` | Warm up the usage gauges with one minimal request per account (costs a few tokens) |
 | `cxs log [count]` | Recent activity: account switches, limits hit, rotations, probes |

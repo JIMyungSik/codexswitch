@@ -102,7 +102,8 @@ if (cmd === 'exec') {
   process.argv.forEach((a, i2) => { if (a === '-c') cfgs.push(process.argv[i2 + 1]); });
   const sbi = process.argv.indexOf('--sandbox');
   const sb = sbi > -1 ? ' sb=' + process.argv[sbi + 1] : '';
-  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + sb + (cfgs.length ? ' cfg=' + cfgs.join(',') : ''));
+  const prompt = process.argv[process.argv.length - 1] || '';
+  console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + sb + (cfgs.length ? ' cfg=' + cfgs.join(',') : '') + ' prompt64=' + Buffer.from(prompt).toString('base64'));
   process.exit(0);
 }
 process.exit(0);
@@ -154,6 +155,7 @@ r = run(['list']);
 assert.match(r.out, /a@test\.com/);
 assert.match(r.out, /work-b/);
 assert.match(r.out, /pro/);
+assert.match(r.out, /2\/2 ready/);
 
 // --- use / current ---
 run(['use', 'a@test.com']);
@@ -257,7 +259,7 @@ r = run(['usage']);
 assert.match(r.out, /97%/);
 assert.match(r.out, /resets in/);
 assert.match(r.out, /≥ threshold 90%/);
-assert.match(r.out, /rotation would pick: a@test\.com/);
+assert.match(r.out, /Next account\s+a@test\.com/);
 r = run(['usage', 'work-b']);
 assert.match(r.out, /work-b/);
 assert.ok(!/a@test\.com \(/.test(r.out), 'single-account usage must filter');
@@ -358,7 +360,7 @@ r = run(['chat'], { input: 'first turn\nsecond turn\n/usage\n/quit\n' });
 assert.match(r.out, /codexswitch chat/);
 assert.match(r.out, /EXEC_OK acc-b/); // turn 1: fresh exec
 assert.match(r.out, /RESUME_OK acc-b/); // turn 2: resumed session
-assert.match(r.out, /rotation would pick/); // /usage worked inside chat
+assert.match(r.out, /Next account/); // /usage worked inside chat
 // prompts starting with "-" must not be parsed as codex options
 r = run(['chat'], { input: '- Recyclespot: fix numbers\n- second dashed turn\n/quit\n' });
 assert.match(r.out, /EXEC_OK acc-b/);
@@ -366,6 +368,36 @@ assert.match(r.out, /RESUME_OK acc-b/);
 assert.ok(!/unexpected argument/.test(r.out), 'dash prompt must be protected by --');
 r = run(['exec', '- dashed prompt here']);
 assert.match(r.out, /EXEC_OK acc-b/);
+
+// Prompt matrix: quoting, Unicode, whitespace and long inputs survive argv
+// forwarding exactly. Repeat each shape to catch state leaking between runs.
+const promptMatrix = [
+  '한국어 질문: "따옴표"와 이모지 🚀',
+  "single 'quote' and $dollar; semicolon",
+  'line one\nline two\n- bullet three',
+  '- starts with a dash and contains spaces',
+  'x'.repeat(4096),
+];
+for (let repeat = 0; repeat < 3; repeat++) {
+  for (const prompt of promptMatrix) {
+    r = run(['exec', prompt]);
+    assert.match(r.out, new RegExp(`prompt64=${Buffer.from(prompt).toString('base64')}`));
+  }
+}
+
+// Multiline chat input is collected as one turn and keeps exact newlines.
+const pastedPrompt = '첫 줄\n- 둘째 줄\n마지막 "줄"';
+r = run(['chat'], { input: `/paste\n${pastedPrompt}\n/end\n/status\n/quit\n` });
+assert.match(r.out, /turn 1 · new session · 3 lines/);
+assert.match(r.out, new RegExp(`prompt64=${Buffer.from(pastedPrompt).toString('base64')}`));
+assert.match(r.out, /reasoning show/);
+
+// In-chat settings are reflected immediately; /new resets turn/session state.
+r = run(['chat'], { input: '/reasoning concise\n/status\nfirst\n/new\nsecond\n/quit\n' });
+assert.match(r.out, /reasoning concise/);
+assert.match(r.out, /cfg=model_reasoning_summary=concise/);
+assert.strictEqual((r.out.match(/turn 1 · new session/g) || []).length, 2);
+run(['reasoning', 'show']);
 
 // chat rotation: account a limit-fails mid-conversation, b resumes the turn
 run(['order', 'a@test.com', 'work-b']);
@@ -382,7 +414,7 @@ assert.match(r.out, /work-b: 5h 42%/);
 assert.ok(!/EXEC_OK/.test(r.out), 'probe must not echo codex output');
 
 // --- activity log records switches/limits/probes ---
-r = run(['log']);
+r = run(['log', '100']);
 assert.match(r.out, /probe/);
 assert.match(r.out, /switch/);
 
@@ -398,10 +430,10 @@ run(['priority', 'work-b', 'auto']);
   fs.writeFileSync(metaFile, JSON.stringify(m));
 }
 r = run(['usage']);
-assert.match(r.out, /rotation would pick: work-b/); // soonest weekly reset wins
+assert.match(r.out, /Next account\s+work-b/); // soonest weekly reset wins
 run(['priority', 'a@test.com', '0']); // pinning beats use-or-lose
 r = run(['usage']);
-assert.match(r.out, /rotation would pick: a@test\.com/);
+assert.match(r.out, /Next account\s+a@test\.com/);
 run(['clear-limit', 'a@test.com']);
 run(['clear-limit', 'work-b']);
 

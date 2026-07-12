@@ -155,7 +155,7 @@ function cmdLogin(args) {
 function cmdList() {
   const accounts = store.listAccounts();
   if (accounts.length === 0) {
-    out('no accounts yet — add one with "codexswitch login" or "codexswitch import"');
+    printEmptyAccounts();
     return;
   }
   const now = Date.now();
@@ -170,10 +170,10 @@ function cmdList() {
     const status = a.disabled
       ? ui.red('disabled')
       : a.limitedUntil && a.limitedUntil > now
-        ? ui.yellow(`limited ${fmtRemaining(a.limitedUntil)}`)
+        ? ui.yellow(`paused ${fmtRemaining(a.limitedUntil)}`)
         : over
           ? ui.yellow(`over-${over}`)
-          : ui.green('ok');
+          : ui.green('ready');
     return [
       a.active ? ui.green('●') : '',
       a.active ? ui.bold(a.name) : a.name,
@@ -187,7 +187,19 @@ function cmdList() {
     ];
   });
   out(table(rows, ['', 'name', 'email', 'plan', 'prio', 'status', '5h', 'week', 'token refreshed']));
-  out(ui.dim(`(rotate threshold: 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}% — change with "codexswitch threshold")`));
+  const ready = accounts.filter((a) => store.isUsable(a, meta, now));
+  const next = store.pickAccount();
+  out(ui.dim(`\n${ready.length}/${accounts.length} ready · next: ${next ? next.name : 'none'} · threshold: 5h ${meta.threshold5h}% / week ${meta.thresholdWeekly}%`));
+  if (!next) out(ui.warn('No account can run now. Check details with "codexswitch usage".'));
+}
+
+function printEmptyAccounts() {
+  out(ui.bold('No accounts yet'));
+  out('  1. Import the account already signed in to Codex:');
+  out(`     ${ui.cyan('codexswitch import')}`);
+  out('  2. Add another account in an isolated login:');
+  out(`     ${ui.cyan('codexswitch login <name>')}`);
+  out(ui.dim('\nYour current Codex login is never replaced during step 2.'));
 }
 
 function cmdUse(args) {
@@ -377,6 +389,13 @@ function cmdModel(args) {
 function usageLines(accounts, meta, { cursor = -1 } = {}) {
   const now = Date.now();
   const lines = [];
+  const usable = accounts.filter((a) => store.isUsable(a, meta, now));
+  const active = accounts.find((a) => a.active);
+  lines.push(
+    `${ui.bold('Usage overview')}  ${ui.green(`${usable.length} ready`)} / ${accounts.length}` +
+      `${active ? ui.dim(` · active ${active.name}`) : ''}`
+  );
+  lines.push('');
   const bar = (pct, threshold) => {
     const width = 20;
     const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
@@ -396,7 +415,7 @@ function usageLines(accounts, meta, { cursor = -1 } = {}) {
     const state = a.disabled ? ui.red(' [disabled]') : a.limitedUntil && a.limitedUntil > now ? ui.yellow(` [limited ${fmtRemaining(a.limitedUntil)}]`) : '';
     lines.push(`${cursor >= 0 ? sel : ''}${mark} ${ui.bold(a.name)}${ui.dim(` (${a.plan || a.email || '-'})`)}${state}`);
     if (!a.usage) {
-      lines.push(ui.dim('  no usage data yet — codex records it during runs (try "codexswitch run" once)'));
+      lines.push(ui.dim(`  no usage data yet — measure it with "codexswitch probe ${a.name}"`));
     } else {
       lines.push(gauge('5h    ', a.usage.p5h, meta.threshold5h));
       lines.push(gauge('weekly', a.usage.weekly, meta.thresholdWeekly));
@@ -404,7 +423,8 @@ function usageLines(accounts, meta, { cursor = -1 } = {}) {
     }
   });
   const next = store.pickAccount();
-  lines.push(ui.dim(`\nrotation would pick: ${next ? next.name : '(none usable)'} · threshold 5h ${meta.threshold5h}% / weekly ${meta.thresholdWeekly}%`));
+  lines.push(`\n${ui.dim('Next account')}  ${next ? ui.bold(next.name) : ui.red('none usable')}`);
+  lines.push(ui.dim(`Thresholds    5h ${meta.threshold5h}% · week ${meta.thresholdWeekly}%`));
   return lines;
 }
 
@@ -416,7 +436,7 @@ function cmdUsage(args) {
     if (accounts.length === 0) throw new Error(`no such account: ${args[0]}`);
   }
   if (accounts.length === 0) {
-    out('no accounts yet — add one with "codexswitch login" or "codexswitch import"');
+    printEmptyAccounts();
     return;
   }
   for (const l of usageLines(accounts, meta)) out(l);
@@ -872,6 +892,8 @@ async function cmdExec(args) {
 
   store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
   const meta = store.loadMeta();
+  const sessionMode = rest[0] === 'resume' ? 'continue' : 'new';
+  const reasoningMode = meta.reasoning || 'show';
   const total = store.listAccounts().length;
   if (total === 0) throw new Error('no accounts — add one with "codexswitch login"');
 
@@ -888,7 +910,10 @@ async function cmdExec(args) {
     }
     tried.push(name);
     console.error(
-      ui.info(`exec as ${ui.bold(`"${name}"`)}${ui.dim(attempt > 0 ? ` (attempt ${attempt + 1}${useResume ? ', resuming session' : ''})` : '')}`)
+      ui.info(
+        `account ${ui.bold(`"${name}"`)}${ui.dim(` · session ${useResume || sessionMode === 'continue' ? 'continue' : 'new'} · reasoning ${reasoningMode}`)}` +
+          `${ui.dim(attempt > 0 ? ` · attempt ${attempt + 1}` : '')}`
+      )
     );
     // On rotation, continue the same session with the next account instead
     // of restarting the whole prompt — the session files are shared.
@@ -943,9 +968,14 @@ async function cmdChat() {
   if (store.listAccounts().length === 0) {
     throw new Error('no accounts — add one with "codexswitch login"');
   }
-  const meta = store.loadMeta();
-  out(`${ui.bold('codexswitch chat')} ${ui.dim(`· model ${meta.model || '(codex default)'} · rotation on limits`)}`);
-  out(ui.dim('type a prompt, or /help for commands (/quit to exit)\n'));
+  const chatStatus = () => {
+    const currentMeta = store.loadMeta();
+    const active = store.listAccounts().find((a) => a.active);
+    const next = store.pickAccount();
+    return `model ${currentMeta.model || 'default'} · reasoning ${currentMeta.reasoning || 'show'} · account ${(active && active.name) || (next && next.name) || 'none'}`;
+  };
+  out(`${ui.bold('codexswitch chat')} ${ui.dim(`· ${chatStatus()}`)}`);
+  out(ui.dim('Enter sends · /paste starts multiline input · /help lists commands\n'));
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   rl.setPrompt(ui.enabled ? `${ui.cyan('cxs')} ${ui.dim('›')} ` : 'cxs › ');
@@ -971,6 +1001,7 @@ async function cmdChat() {
   };
 
   let inSession = false;
+  let turn = 0;
   for (;;) {
     const raw = await ask();
     if (raw == null) break; // EOF (Ctrl-D or piped input ended)
@@ -982,7 +1013,8 @@ async function cmdChat() {
       try {
         if (cmd === 'quit' || cmd === 'exit' || cmd === 'q') break;
         else if (cmd === 'help')
-          out(ui.dim('/usage /list /use <name> /next /model [m] /sandbox [mode] /reasoning [mode] /new (fresh session) /quit'));
+          out(ui.dim('/status /usage /list /use <name> /next /model [m] /sandbox [mode] /reasoning [mode] /paste /new /quit'));
+        else if (cmd === 'status') out(ui.info(chatStatus()));
         else if (cmd === 'usage') cmdUsage([]);
         else if (cmd === 'list') cmdList();
         else if (cmd === 'use') cmdUse(rest);
@@ -992,7 +1024,29 @@ async function cmdChat() {
         else if (cmd === 'reasoning') cmdReasoning(rest);
         else if (cmd === 'new') {
           inSession = false;
+          turn = 0;
           out(ui.ok('starting a fresh session on the next prompt'));
+        } else if (cmd === 'paste' || cmd === 'multiline') {
+          out(ui.info('multiline input · finish with /end on its own line · cancel with /cancel'));
+          const parts = [];
+          for (;;) {
+            const pasted = await ask();
+            if (pasted == null || pasted.trim() === '/cancel') {
+              parts.length = 0;
+              out(ui.warn('multiline input cancelled'));
+              break;
+            }
+            if (pasted.trim() === '/end') break;
+            parts.push(pasted);
+          }
+          if (parts.length > 0) {
+            const prompt = parts.join('\n');
+            turn++;
+            out(ui.info(`turn ${turn} · ${inSession ? 'continuing session' : 'new session'} · ${prompt.split('\n').length} lines`));
+            const code = await cmdExec(inSession ? ['resume', '--last', '--', prompt] : ['--', prompt]);
+            if (code === 0) inSession = true;
+            else if (code === 2) out(ui.fail('all accounts exhausted — try again later or /use a specific account'));
+          }
         } else out(ui.warn(`unknown command /${cmd} — try /help`));
       } catch (e) {
         out(ui.fail(e.message));
@@ -1002,6 +1056,8 @@ async function cmdChat() {
 
     // "--" marks the prompt as positional so lines starting with "-" are
     // never parsed as codex options.
+    turn++;
+    out(ui.info(`turn ${turn} · ${inSession ? 'continuing session' : 'new session'}`));
     const code = await cmdExec(inSession ? ['resume', '--last', '--', line] : ['--', line]);
     if (code === 0) inSession = true;
     else if (code === 2) out(ui.fail('all accounts exhausted — try again later or /use a specific account'));
