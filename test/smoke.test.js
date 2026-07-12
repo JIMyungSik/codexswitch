@@ -145,6 +145,35 @@ function run(args, opts = {}) {
   return res;
 }
 
+// GJC-inspired landing screen: stable two-column information hierarchy with
+// account, project, history and a fixed prompt area.
+{
+  const { buildWelcomeFrame } = require('../src/welcome.js');
+  const { displayWidth } = require('../src/util.js');
+  const frame = buildWelcomeFrame({
+    width: 100,
+    height: 28,
+    input: '테스트 요청',
+    state: {
+      version: 'test',
+      accounts: [{ name: '개인용', active: true, disabled: false, limitedUntil: null, usage: { p5h: { pct: 42 } } }],
+      active: { name: '개인용', active: true, disabled: false, limitedUntil: null, usage: { p5h: { pct: 42 } } },
+      model: 'gpt-test', reasoning: 'concise', memory: 'shared', output: 'auto',
+      history: [{ id: 'abc-123', status: 'done', prompt: 'previous task' }],
+      project: { branch: 'main', changes: 2 }, cwd: '/tmp/project',
+    },
+  });
+  const lines = frame.split('\r\n');
+  assert.strictEqual(lines.length, 28);
+  assert.ok(lines.every((line) => displayWidth(line) === 100), 'welcome frame must fill every terminal row exactly');
+  assert.match(frame, /CODEX SWITCH/);
+  assert.match(frame, /Account pool/);
+  assert.match(frame, /Project pulse/);
+  assert.match(frame, /Session trail/);
+  assert.match(frame, /테스트 요청/);
+  assert.strictEqual(buildWelcomeFrame({ width: 60, height: 20, state: {} }), null);
+}
+
 // No-argument first run gives setup guidance instead of entering a broken REPL.
 let r = run([], { input: '' });
 assert.match(r.out, /No accounts yet/);

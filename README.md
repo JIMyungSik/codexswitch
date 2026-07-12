@@ -202,13 +202,13 @@ cxs list                # per-account 5h/week usage columns
 
 | Command | Description |
 |---|---|
-| `cxs` | **Default persistent prompt**: launch once and keep entering requests; turns 2+ automatically continue the same Codex session |
+| `cxs` | **Default persistent prompt**: two-column account/project/history dashboard, then continuous input; turns 2+ continue the same Codex session |
 | `cxs login [name]` | Log in to a new account and store it (existing login untouched; defaults to the email as the name) |
 | `cxs import [name]` | Import the account currently in `~/.codex` |
 | `cxs add-key <name> [key]` | Register an OpenAI API-key account (falls back to `$OPENAI_API_KEY`) |
 | `cxs list` | List accounts: active marker, email, plan, priority, limit status, usage % |
 | `cxs usage [name]` | Per-account usage dashboard: 5h/weekly gauge bars, reset countdowns, next rotation pick (alias: `status`) |
-| `cxs chat` | Explicitly launch the same persistent prompt as `cxs`. Use `/paste` for multiline input. Commands: `/status /history /usage /use /next /model /reasoning /output /memory /new /quit` |
+| `cxs chat [--simple]` | Launch the same persistent prompt; `--simple` skips the full-screen landing. Use `/paste` for multiline input |
 | `cxs watch` | Live interactive dashboard — refreshes every 5s; keys: `↑/↓` select, `s` switch, `e` enable/disable, `p` probe, `q` quit |
 | `cxs probe [name]` | Warm up the usage gauges with one minimal request per account (costs a few tokens) |
 | `cxs log [count]` | Recent activity: account switches, limits hit, rotations, probes |

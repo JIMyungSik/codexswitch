@@ -39,7 +39,8 @@ Accounts
   clear-limit <name>      forget a recorded rate-limit for an account
 
 Running codex
-  chat                    interactive prompt loop (Claude Code-style): each turn
+  chat [--simple]         interactive prompt loop with a two-column welcome
+                          dashboard (--simple skips the full-screen landing): each turn
                           runs through rotation and resumes the same session,
                           so the conversation survives account switches
                           (/status /usage /memory /use /next /model /new /quit)
@@ -1306,11 +1307,17 @@ async function cmdExec(args) {
 // Every turn goes through the rotation engine, and turns 2+ resume the same
 // codex session — so the conversation continues even when the account under
 // it changes between (or during) turns.
-async function cmdChat() {
+async function cmdChat({ welcome = true } = {}) {
   const readline = require('readline');
   runner.assertCodexAvailable();
   if (store.listAccounts().length === 0) {
     throw new Error('no accounts — add one with "codexswitch login"');
+  }
+  let welcomePrompt = null;
+  if (welcome) {
+    const landing = await require('./welcome.js').readWelcomePrompt();
+    if (landing.shown && landing.prompt == null) return 0;
+    welcomePrompt = landing.prompt;
   }
   const chatStatus = () => {
     const currentMeta = store.loadMeta();
@@ -1325,7 +1332,7 @@ async function cmdChat() {
   rl.setPrompt(ui.enabled ? `${ui.cyan('cxs')} ${ui.dim('›')} ` : 'cxs › ');
   // Buffer lines ourselves: input can arrive while a turn is still running
   // (type-ahead, piped input) and must not be dropped or hit a closed rl.
-  const pending = [];
+  const pending = welcomePrompt ? [welcomePrompt] : [];
   const waiters = [];
   let closed = false;
   rl.on('line', (l) => {
@@ -1533,7 +1540,7 @@ async function main(argv) {
       return cmdExec(args);
     case 'chat':
     case 'repl':
-      return cmdChat();
+      return cmdChat({ welcome: !args.includes('--simple') });
     case 'server':
     case 'proxy':
       return cmdServer(args);
