@@ -11,6 +11,8 @@ const ui = require('./ui.js');
 
 const HELP = `codexswitch — multi-account manager for the OpenAI Codex CLI
 
+Run without a command to open the persistent interactive prompt.
+
 Accounts
   login [name]            log in to a new account (isolated "codex login") and store it
   import [name]           import the account currently in ~/.codex/auth.json
@@ -1408,6 +1410,7 @@ async function cmdChat() {
     else if (code === 2) out(ui.fail('all accounts exhausted — try again later or /use a specific account'));
   }
   rl.close();
+  out(ui.dim(`\nsession ended · ${turn} turn${turn === 1 ? '' : 's'}${turn > 0 ? ' · review with "codexswitch history"' : ''}`));
   return 0;
 }
 
@@ -1428,6 +1431,11 @@ async function main(argv) {
   const [cmd, ...args] = argv;
   switch (cmd) {
     case undefined:
+      if (store.listAccounts().length === 0) {
+        printEmptyAccounts();
+        return 0;
+      }
+      return cmdChat();
     case 'help':
     case '--help':
     case '-h':

@@ -145,10 +145,15 @@ function run(args, opts = {}) {
   return res;
 }
 
+// No-argument first run gives setup guidance instead of entering a broken REPL.
+let r = run([], { input: '' });
+assert.match(r.out, /No accounts yet/);
+assert.match(r.out, /codexswitch import/);
+
 // --- import two accounts ---
 fs.writeFileSync(path.join(codexHome, 'config.toml'), 'model = "gpt-5.2-codex"\n');
 fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(fakeAuth('a@test.com', 'acc-a')));
-let r = run(['import']);
+r = run(['import']);
 assert.match(r.out, /added account "a@test.com"/);
 assert.match(r.out, /active/);
 
@@ -400,6 +405,14 @@ assert.match(r.out, /codexswitch chat/);
 assert.match(r.out, /EXEC_OK acc-b/); // turn 1: fresh exec
 assert.match(r.out, /RESUME_OK acc-b/); // turn 2: resumed session
 assert.match(r.out, /Next account/); // /usage worked inside chat
+assert.match(r.out, /session ended · 2 turns/);
+
+// Like gjc, running `cxs` without a subcommand opens the persistent prompt.
+r = run([], { input: 'default first\ndefault second\n/quit\n' });
+assert.match(r.out, /codexswitch chat/);
+assert.match(r.out, /EXEC_OK acc-b/);
+assert.match(r.out, /RESUME_OK acc-b/);
+assert.match(r.out, /session ended · 2 turns/);
 // prompts starting with "-" must not be parsed as codex options
 r = run(['chat'], { input: '- Recyclespot: fix numbers\n- second dashed turn\n/quit\n' });
 assert.match(r.out, /EXEC_OK acc-b/);

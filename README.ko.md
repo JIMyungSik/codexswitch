@@ -200,12 +200,13 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 
 | 명령 | 설명 |
 |---|---|
+| `cxs` | **기본 지속형 프롬프트**: 한 번 실행한 뒤 여러 요청을 계속 입력. 두 번째 요청부터 같은 Codex 세션을 자동으로 이어감 |
 | `cxs login [이름]` | 새 계정 로그인 후 저장 (기존 로그인 유지, 이름 생략 시 이메일 사용) |
 | `cxs import [이름]` | 현재 `~/.codex`에 로그인된 계정을 저장소로 가져오기 |
 | `cxs add-key <이름> [키]` | OpenAI API 키 계정 등록 (키 생략 시 `$OPENAI_API_KEY` 사용) |
 | `cxs list` | 계정 목록: 활성 표시, 이메일, 플랜, 우선순위, 한도 상태, 사용량 % |
 | `cxs usage [이름]` | 계정별 사용량 대시보드: 5시간/주간 게이지 바, 리셋 카운트다운, 다음 로테이션 계정 (별칭: `status`) |
-| `cxs chat` | **대화형 입력창 (Claude Code 스타일)**: 매 턴마다 계정·세션·추론 모드를 표시하고, 계정이 바뀌어도 대화가 유지됨. `/paste`로 여러 줄 입력(`/end`로 완료). 내부 명령: `/status /usage /use /next /model /reasoning /new /quit` |
+| `cxs chat` | `cxs`와 같은 지속형 입력창을 명시적으로 실행. `/paste`로 여러 줄 입력(`/end`로 완료). 내부 명령: `/status /history /usage /use /next /model /reasoning /output /memory /new /quit` |
 | `cxs watch` | 실시간 인터랙티브 대시보드 — 5초마다 갱신; 키: `↑/↓` 선택, `s` 전환, `e` 활성/비활성, `p` 프로브, `q` 종료 |
 | `cxs probe [이름]` | 계정마다 최소 요청 1회를 보내 사용량 게이지 워밍업 (토큰 소량 소모) |
 | `cxs log [개수]` | 최근 활동 기록: 계정 전환, 한도 도달, 로테이션, 프로브 |
