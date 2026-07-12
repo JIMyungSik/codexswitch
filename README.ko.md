@@ -209,6 +209,8 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs watch` | 실시간 인터랙티브 대시보드 — 5초마다 갱신; 키: `↑/↓` 선택, `s` 전환, `e` 활성/비활성, `p` 프로브, `q` 종료 |
 | `cxs probe [이름]` | 계정마다 최소 요청 1회를 보내 사용량 게이지 워밍업 (토큰 소량 소모) |
 | `cxs log [개수]` | 최근 활동 기록: 계정 전환, 한도 도달, 로테이션, 프로브 |
+| `cxs history [개수]` | 실제 작업 이력: 요청, 성공 여부, 계정 전환 흐름, 소요 시간, 변경 파일 |
+| `cxs history show <ID\|latest>` | 요청 원문과 계정별 시도 결과, 실행 후 Git 변경 파일 상세 확인 |
 | `cxs use <이름>` | 활성 계정 전환 |
 | `cxs current` | 현재 활성 계정 확인 |
 | `cxs next` | 설정된 순서의 다음 계정으로 전환 (끝에 오면 처음으로 순환) |
@@ -219,14 +221,17 @@ cxs list                # 계정별 5h/week 사용량 % 확인
 | `cxs model [모델명]` | `run`/`exec`에 자동 적용할 기본 모델 설정 (`default`로 초기화) |
 | `cxs threshold [5h%] [주간%]` | 사용량이 이 퍼센트에 도달하면 다음 계정으로 전환 (기본 95, 값 하나면 둘 다) |
 | `cxs reasoning <show\|concise\|hide>` | 실행 중 모델 추론("생각") 출력량 조절 — `hide`는 완전 숨김, `concise`는 한 줄 요약 |
+| `cxs output <auto\|compact\|raw>` | 출력 가독성. `auto`는 터미널에서 중간 diff를 접고 최종 답변·작업 요약만 표시하며, 파이프에서는 raw 유지 |
+| `cxs memory [명령]` | 계정 간 기억 관리. `shared`는 모든 계정이 공유, `isolated`는 계정별 분리, `off`는 주입 중단. `add/show/path` 지원 |
 | `cxs sandbox <read-only\|write\|write+net\|full>` | exec/chat의 파일 접근 권한 — `write`는 작업 폴더 수정, `write+net`은 ssh/curl 등 네트워크까지 허용, `full`은 샌드박스 해제 |
 | `cxs patterns [add/remove]` | 한도 감지에 쓸 커스텀 정규식 패턴 추가/삭제 |
 | `cxs export <파일>` | 전체 계정·설정 백업 (⚠️ 토큰 포함 — 비밀번호처럼 취급) |
 | `cxs restore <파일>` | 백업 파일에서 계정 복원 (다른 PC 이전용) |
 | `cxs completion <bash\|zsh>` | 셸 자동완성 스크립트 출력 |
 | `cxs <그 외 명령>` | codex로 그대로 전달 — `cxs resume`, `cxs goal ...`, `cxs apply` 등 codex의 모든 명령을 관리 계정으로 바로 사용 가능 |
-| `cxs server [--port N]` | **실험 기능** 로컬 프록시(teamclaude 방식): 요청마다 인증을 교체하고, 429는 다음 계정으로 재시도, 응답 헤더에서 사용량을 실시간 수집 |
-| `cxs run --proxy [인자]` | codex를 로컬 프록시 경유로 실행 — 대화형 세션 안에서도 요청 단위 로테이션 |
+| `cxs server [--port N]` | **실험 기능** 로컬 프록시(teamclaude 방식): 할당량 429만 계정 전환하고 짧은 분당 제한은 같은 계정에서 재시도, 사용량 실시간 수집 |
+| `cxs server status` | 프록시 연결 상태와 요청 단위 로테이션 활성 여부 확인 |
+| `cxs run --proxy [인자]` | 프록시가 있으면 경유하고 없으면 직접 실행. 반드시 필요하면 `--require-proxy` 사용 |
 | `cxs remove <이름>` | 계정 삭제 |
 | `cxs rename <옛이름> <새이름>` | 계정 이름 변경 |
 | `cxs disable / enable <이름>` | 로테이션에서 임시 제외 / 복귀 |

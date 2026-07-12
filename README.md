@@ -211,6 +211,8 @@ cxs list                # per-account 5h/week usage columns
 | `cxs watch` | Live interactive dashboard — refreshes every 5s; keys: `↑/↓` select, `s` switch, `e` enable/disable, `p` probe, `q` quit |
 | `cxs probe [name]` | Warm up the usage gauges with one minimal request per account (costs a few tokens) |
 | `cxs log [count]` | Recent activity: account switches, limits hit, rotations, probes |
+| `cxs history [count]` | Work history: request, result, account flow, duration, and changed files |
+| `cxs history show <ID\|latest>` | Full request, per-account attempts, and Git workspace changes for one run |
 | `cxs use <name>` | Switch the active account |
 | `cxs current` | Show the active account |
 | `cxs next` | Switch to the next account in rotation order (wraps around) |
@@ -221,14 +223,17 @@ cxs list                # per-account 5h/week usage columns
 | `cxs model [name]` | Set the default model injected into `run`/`exec` (`default` to reset) |
 | `cxs threshold [5h%] [wk%]` | Rotate to the next account when usage reaches these percents (default 95; one value sets both) |
 | `cxs reasoning <show\|concise\|hide>` | How much model reasoning ("thinking") to print during runs — `hide` for clean output, `concise` for one-line summaries |
+| `cxs output <auto\|compact\|raw>` | Output readability: `auto` folds intermediate diffs in a TTY and shows the final result plus work summary; pipes stay raw |
+| `cxs memory [command]` | Manage persistent context: `shared` across accounts, per-account `isolated`, or `off`; supports `add/show/path` |
 | `cxs sandbox <read-only\|write\|write+net\|full>` | File access for exec/chat — `write` edits files in cwd, `write+net` also allows ssh/curl/network, `full` disables the sandbox |
 | `cxs patterns [add/remove]` | Custom regex patterns treated as rate-limit errors |
 | `cxs export <file>` | Back up all accounts + settings (⚠️ contains tokens — treat like a password) |
 | `cxs restore <file>` | Restore accounts from a backup (for moving machines) |
 | `cxs completion <bash\|zsh>` | Print a shell completion script |
 | `cxs <anything else>` | Forwarded to codex under the managed account — `cxs resume`, `cxs goal ...`, `cxs apply` all work like their codex counterparts |
-| `cxs server [--port N]` | **EXPERIMENTAL** local proxy (teamclaude-style): swaps credentials per request, retries 429s on the next account, and feeds usage gauges live from response headers |
-| `cxs run --proxy [args]` | Run codex routed through the local proxy — per-request rotation even inside interactive sessions |
+| `cxs server [--port N]` | **EXPERIMENTAL** local proxy (teamclaude-style): rotates on quota 429s, retries short throttles on the same account, and collects live usage |
+| `cxs server status` | Check proxy reachability and whether per-request rotation is active |
+| `cxs run --proxy [args]` | Use the proxy when available and fall back to direct mode; add `--require-proxy` for strict mode |
 | `cxs remove <name>` | Delete an account |
 | `cxs rename <old> <new>` | Rename an account |
 | `cxs disable / enable <name>` | Temporarily exclude from / restore to rotation |

@@ -87,12 +87,13 @@ if (cmd === 'exec') {
     auth.last_refresh = '2026-02-02T00:00:00Z'; // simulate a token refresh
     fs.writeFileSync(path.join(home, 'auth.json'), JSON.stringify(auth));
   }
+  if (process.env.FAKE_TOUCH === '1') fs.writeFileSync(path.join(process.cwd(), 'changed.txt'), 'changed by fake codex\\n');
   // like real codex (clap): any unknown dash-argument before "--" is fatal
   const sepIdx = process.argv.indexOf('--');
-  const KNOWN = ['--skip-git-repo-check', '--last', '-m', '-c', '--sandbox'];
+  const KNOWN = ['--skip-git-repo-check', '--last', '-m', '-c', '--sandbox', '-o', '--output-last-message'];
   for (let i = 3; i < (sepIdx === -1 ? process.argv.length : sepIdx); i++) {
     const arg = process.argv[i];
-    if (['-m', '-c', '--sandbox'].includes(process.argv[i - 1])) continue; // option values
+    if (['-m', '-c', '--sandbox', '-o', '--output-last-message'].includes(process.argv[i - 1])) continue; // option values
     if (arg.startsWith('-') && !KNOWN.includes(arg) && arg !== 'resume') {
       console.error("error: unexpected argument '" + arg + "' found");
       process.exit(2);
@@ -103,6 +104,8 @@ if (cmd === 'exec') {
   const sbi = process.argv.indexOf('--sandbox');
   const sb = sbi > -1 ? ' sb=' + process.argv[sbi + 1] : '';
   const prompt = process.argv[process.argv.length - 1] || '';
+  const oi = Math.max(process.argv.indexOf('-o'), process.argv.indexOf('--output-last-message'));
+  if (oi > -1) fs.writeFileSync(process.argv[oi + 1], 'Completed clearly for ' + id + '\\n\\n- build passed\\n- files updated\\n');
   console.log((isResume ? 'RESUME_OK ' : 'EXEC_OK ') + id + ' model=' + model + sb + (cfgs.length ? ' cfg=' + cfgs.join(',') : '') + ' prompt64=' + Buffer.from(prompt).toString('base64'));
   process.exit(0);
 }
@@ -133,6 +136,7 @@ function run(args, opts = {}) {
     env: { ...baseEnv, ...(opts.env || {}) },
     encoding: 'utf8',
     input: opts.input,
+    cwd: opts.cwd,
   });
   const res = { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
   if (res.code !== 0 && !opts.allowFail) {
@@ -188,6 +192,18 @@ assert.ok(limited > 1.5 * 3600000 && limited < 2.5 * 3600000, `unexpected cooldo
 const storedB = JSON.parse(fs.readFileSync(path.join(switchHome, 'accounts', 'work-b.json'), 'utf8'));
 assert.strictEqual(storedB.last_refresh, '2026-02-02T00:00:00Z');
 
+// Structured history explains exactly what ran and how account rotation went.
+r = run(['history']);
+assert.match(r.out, /do the thing/);
+assert.match(r.out, /a@test\.com → work-b/);
+r = run(['history', 'show', 'latest']);
+assert.match(r.out, /Request\s+do the thing/);
+assert.match(r.out, /rate-limited\s+a@test\.com/);
+assert.match(r.out, /done\s+work-b/);
+assert.match(r.out, /Session\s+new · memory off · reasoning show/);
+assert.match(r.out, /Files changed during this run/);
+assert.match(r.out, /Git workspace after run/);
+
 // --- next: skips the limited account? only b is usable and b!=active ---
 r = run(['next']);
 assert.match(r.out, /now using "work-b"/);
@@ -219,6 +235,26 @@ assert.match(r.out, /cfg=model_reasoning_summary=concise/);
 run(['reasoning', 'show']);
 r = run(['exec', 'normal again']);
 assert.ok(!/cfg=/.test(r.out), 'show mode must not inject -c overrides');
+
+// Compact output hides noisy Codex event/diff output and separates the final
+// answer from an explicit work summary. Auto remains raw in this piped test.
+run(['output', 'compact']);
+run(['order', 'a@test.com', 'work-b']);
+run(['clear-limit', 'a@test.com']);
+run(['clear-limit', 'work-b']);
+r = run(['exec', 'make the output understandable']);
+assert.match(r.out, /Result\s+─{10,}/);
+assert.match(r.out, /Completed clearly for acc-b/);
+assert.match(r.out, /Work summary/);
+assert.match(r.out, /a@test\.com → work-b/);
+assert.ok(!/EXEC_OK|RESUME_OK/.test(r.out), 'compact mode must hide raw Codex output');
+const explicitResult = path.join(root, 'last-message.txt');
+r = run(['exec', '-a', 'work-b', '-o', explicitResult, 'keep my output file']);
+assert.match(r.out, /Completed clearly for acc-b/);
+assert.ok(fs.existsSync(explicitResult), 'a user-provided output file must be preserved');
+run(['output', 'auto']);
+r = run(['output']);
+assert.match(r.out, /output: auto/);
 
 // --- sandbox: write mode injects --sandbox workspace-write ---
 run(['sandbox', 'write']);
@@ -318,6 +354,9 @@ assert.match(r.out, /codexswitch login a@test\.com/);
 assert.match(r.out, /(EXEC|RESUME)_OK acc-b/); // work continued on b
 r = run(['list']);
 assert.match(r.out, /disabled/);
+r = run(['history', 'show', 'latest']);
+assert.match(r.out, /auth-failed\s+a@test\.com/);
+assert.match(r.out, /done\s+work-b/);
 // re-importing fresh credentials re-enables the account
 fs.writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(fakeAuth('a@test.com', 'acc-a', 'plus', '2026-04-04T00:00:00Z')));
 run(['import', 'a@test.com']);
@@ -384,6 +423,65 @@ for (let repeat = 0; repeat < 3; repeat++) {
     assert.match(r.out, new RegExp(`prompt64=${Buffer.from(prompt).toString('base64')}`));
   }
 }
+r = run(['history', 'show', 'latest']);
+assert.match(r.out, new RegExp('x{100}'));
+
+// History distinguishes files touched by this run from pre-existing changes.
+const worktree = path.join(root, 'history-worktree');
+fs.mkdirSync(worktree, { recursive: true });
+assert.strictEqual(spawnSync('git', ['init', '-q'], { cwd: worktree }).status, 0);
+r = run(['exec', '-a', 'work-b', 'change a file'], { env: { FAKE_TOUCH: '1' }, cwd: worktree });
+assert.match(r.out, /history [a-z0-9-]+/);
+r = run(['history', 'show', 'latest'], { cwd: worktree });
+assert.match(r.out, /Files changed during this run\s+\?\? changed\.txt/);
+assert.match(r.out, /Git workspace after run\s+\?\? changed\.txt/);
+
+// --- cross-account memory: opt-in shared or per-account isolated context ---
+r = run(['memory']);
+assert.match(r.out, /memory: off/);
+run(['memory', 'shared']);
+run(['memory', 'add', 'Always answer dates in ISO format.']);
+r = run(['memory', 'show']);
+assert.match(r.out, /Always answer dates in ISO format/);
+r = run(['exec', '-a', 'work-b', 'What date is it?']);
+{
+  const encoded = r.out.match(/prompt64=([A-Za-z0-9+/=]+)/)[1];
+  const prompt = Buffer.from(encoded, 'base64').toString('utf8');
+  assert.match(prompt, /<codexswitch-memory mode="shared">/);
+  assert.match(prompt, /Always answer dates in ISO format/);
+  assert.match(prompt, /<user-request>\nWhat date is it\?/);
+}
+r = run(['run', 'work-b', 'exec', 'Remember this too']);
+{
+  const prompt = Buffer.from(r.out.match(/prompt64=([A-Za-z0-9+/=]+)/)[1], 'base64').toString('utf8');
+  assert.match(prompt, /Always answer dates in ISO format/);
+  assert.match(prompt, /<user-request>\nRemember this too/);
+}
+r = run(['history', 'show', 'latest']);
+assert.match(r.out, /Request\s+Remember this too/);
+assert.match(r.out, /done\s+work-b/);
+
+run(['memory', 'isolated']);
+run(['use', 'work-b']);
+run(['memory', 'add', 'This is the work account.']);
+run(['use', 'a@test.com']);
+run(['memory', 'add', 'This is the personal account.']);
+r = run(['exec', '-a', 'work-b', 'Identify context']);
+{
+  const prompt = Buffer.from(r.out.match(/prompt64=([A-Za-z0-9+/=]+)/)[1], 'base64').toString('utf8');
+  assert.match(prompt, /This is the work account/);
+  assert.ok(!/personal account/.test(prompt));
+}
+r = run(['exec', '-a', 'a@test.com', 'Identify context'], { env: { FAKE_A_OK: '1' } });
+{
+  const prompt = Buffer.from(r.out.match(/prompt64=([A-Za-z0-9+/=]+)/)[1], 'base64').toString('utf8');
+  assert.match(prompt, /This is the personal account/);
+  assert.ok(!/work account/.test(prompt));
+}
+r = run(['memory', 'path', 'work-b']);
+assert.match(r.out, /memory[/\\]accounts[/\\]work-b\.md/);
+run(['memory', 'off']);
+run(['use', 'work-b']); // restore the baseline active account for later proxy tests
 
 // Multiline chat input is collected as one turn and keeps exact newlines.
 const pastedPrompt = '첫 줄\n- 둘째 줄\n마지막 "줄"';
@@ -441,12 +539,29 @@ run(['clear-limit', 'work-b']);
 (async () => {
   const httpMod = require('http');
   const { spawn } = require('child_process');
+  let transientHits = 0;
 
   const upstream = httpMod.createServer((req, res) => {
     const auth = req.headers.authorization || '';
+    if (req.url.includes('/transient') && auth.includes('at-acc-a')) {
+      transientHits++;
+      if (transientHits === 1) {
+        res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '0.01' });
+        res.end('{"error":"short throttle"}');
+        return;
+      }
+      res.writeHead(200, { 'x-account': req.headers['chatgpt-account-id'] || '' });
+      res.end('SAME_ACCOUNT_OK');
+      return;
+    }
+    if (req.url.includes('/long-throttle') && auth.includes('at-acc-a')) {
+      res.writeHead(429, { 'retry-after': '120', 'x-account': req.headers['chatgpt-account-id'] || '' });
+      res.end('{"error":"long throttle"}');
+      return;
+    }
     if (auth.includes('at-acc-a')) {
-      res.writeHead(429, { 'content-type': 'application/json' });
-      res.end('{"error":"rate limit"}');
+      res.writeHead(429, { 'content-type': 'application/json', 'x-codex-primary-status': 'rejected' });
+      res.end('{"error":"quota exhausted"}');
       return;
     }
     res.writeHead(200, {
@@ -479,6 +594,8 @@ run(['clear-limit', 'work-b']);
     if (!up) await new Promise((r4) => setTimeout(r4, 100));
   }
   assert.ok(up, 'proxy server did not start');
+  r = run(['server', 'status']);
+  assert.match(r.out, /proxy running/);
 
   run(['clear-limit', 'a@test.com']);
   run(['clear-limit', 'work-b']);
@@ -495,6 +612,30 @@ run(['clear-limit', 'work-b']);
   assert.ok(m2.accounts['a@test.com'].limitedUntil > Date.now(), 'a must be limited after proxy 429');
   assert.strictEqual(Math.round(m2.accounts['work-b'].usage.p5h.pct), 55); // usage from headers
 
+  // A short transient 429 retries the same account instead of burning the next
+  // account and losing that account's prompt cache.
+  run(['clear-limit', 'a@test.com']);
+  run(['clear-limit', 'work-b']);
+  run(['order', 'a@test.com', 'work-b']);
+  const transient = await fetch(`http://127.0.0.1:${proxyPort}/backend-api/transient`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.strictEqual(transient.status, 200);
+  assert.strictEqual(await transient.text(), 'SAME_ACCOUNT_OK');
+  assert.strictEqual(transient.headers.get('x-account'), 'acc-a');
+  assert.strictEqual(transientHits, 2);
+
+  // A longer transient throttle is surfaced to the client and must not spill
+  // the burst onto account B.
+  const longThrottle = await fetch(`http://127.0.0.1:${proxyPort}/backend-api/long-throttle`, {
+    method: 'POST',
+    body: '{}',
+  });
+  assert.strictEqual(longThrottle.status, 429);
+  assert.strictEqual(longThrottle.headers.get('x-account'), 'acc-a');
+  run(['clear-limit', 'a@test.com']);
+
   // run --proxy: profile config.toml is patched to point at the proxy
   run(['clear-limit', 'a@test.com']);
   r = run(['run', '--proxy', 'exec', 'hi']);
@@ -506,6 +647,16 @@ run(['clear-limit', 'work-b']);
 
   srv.kill('SIGTERM');
   upstream.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  // Like teamclaude run, proxy mode degrades gracefully when the server is
+  // down; scripts can opt back into strict behavior with --require-proxy.
+  r = run(['run', '--proxy', 'work-b', 'exec', 'fallback direct']);
+  assert.match(r.out, /proxy unavailable/);
+  assert.match(r.out, /EXEC_OK acc-b/);
+  r = run(['run', '--proxy', '--require-proxy', 'work-b', 'exec', 'strict'], { allowFail: true });
+  assert.strictEqual(r.code, 1);
+  assert.match(r.out, /no proxy on port/);
 
   // --- disable everything -> exec must fail cleanly ---
   run(['disable', 'a@test.com']);
@@ -513,6 +664,9 @@ run(['clear-limit', 'work-b']);
   r = run(['exec', 'x'], { allowFail: true });
   assert.strictEqual(r.code, 2);
   assert.match(r.out, /all accounts are rate-limited, over threshold, or disabled/);
+  r = run(['history', 'show', 'latest']);
+  assert.match(r.out, /exhausted/);
+  assert.match(r.out, /Request\s+x/);
 
   // --- remove ---
   run(['enable', 'work-b']);

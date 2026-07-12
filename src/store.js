@@ -19,6 +19,7 @@ function paths() {
     codexHome,
     accountsDir: path.join(home, 'accounts'),
     profilesDir: path.join(home, 'profiles'),
+    memoryDir: path.join(home, 'memory'),
     metaPath: path.join(home, 'meta.json'),
     authPath: path.join(codexHome, 'auth.json'),
   };
@@ -64,8 +65,78 @@ function readEvents(count = 20) {
   }
 }
 
+// Structured work history is separate from the operational activity log.
+// It intentionally contains user prompts, so the file is created private.
+function logRun(record) {
+  try {
+    ensureDir(paths().home);
+    fs.appendFileSync(path.join(paths().home, 'history.jsonl'), JSON.stringify(record) + '\n', { mode: 0o600 });
+  } catch {
+    /* history must never break an actual Codex run */
+  }
+}
+
+function readRuns(count = 20) {
+  try {
+    const lines = fs.readFileSync(path.join(paths().home, 'history.jsonl'), 'utf8').trim().split('\n');
+    return lines.slice(-count).map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    }).filter(Boolean).reverse();
+  } catch {
+    return [];
+  }
+}
+
+function findRun(id) {
+  const runs = readRuns(1000);
+  if (id === 'latest') return runs[0] || null;
+  return runs.find((run) => run.id === id || run.id.startsWith(id)) || null;
+}
+
 function saveMeta(meta) {
   writeJSONAtomic(paths().metaPath, meta);
+}
+
+function memoryPath(mode, accountName = null) {
+  const p = paths();
+  if (mode === 'shared') return path.join(p.memoryDir, 'shared.md');
+  if (mode === 'isolated') {
+    if (!accountName) throw new Error('isolated memory requires an account name');
+    // Reuse the account-name validation used for credential filenames.
+    accountPath(accountName);
+    return path.join(p.memoryDir, 'accounts', `${accountName}.md`);
+  }
+  return null;
+}
+
+function readMemory(mode, accountName = null) {
+  const file = memoryPath(mode, accountName);
+  if (!file) return '';
+  try {
+    // Bound prompt growth even if the file was edited externally.
+    const text = fs.readFileSync(file, 'utf8');
+    return text.length > 32768 ? text.slice(-32768) : text;
+  } catch {
+    return '';
+  }
+}
+
+function appendMemory(mode, accountName, text) {
+  const file = memoryPath(mode, accountName);
+  if (!file) throw new Error('memory is off — enable it with "codexswitch memory shared" or "memory isolated"');
+  const clean = String(text || '').trim();
+  if (!clean) throw new Error('memory text cannot be empty');
+  ensureDir(path.dirname(file));
+  if (!fs.existsSync(file)) {
+    const title = mode === 'shared' ? '# Shared Codex memory\n' : `# Memory for ${accountName}\n`;
+    fs.writeFileSync(file, `${title}\n`, { mode: 0o600 });
+  }
+  fs.appendFileSync(file, `- ${clean.replace(/\n/g, '\n  ')}\n`, { mode: 0o600 });
+  return file;
 }
 
 function accountPath(name) {
@@ -268,10 +339,17 @@ module.exports = {
   nextAccount,
   logEvent,
   readEvents,
+  logRun,
+  readRuns,
+  findRun,
+  memoryPath,
+  readMemory,
+  appendMemory,
   ensureDirs() {
     const p = paths();
     ensureDir(p.home);
     ensureDir(p.accountsDir);
     ensureDir(p.profilesDir);
+    ensureDir(p.memoryDir);
   },
 };

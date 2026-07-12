@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { readJSONSafe, writeJSONAtomic, authInfo, ensureDir, fmtDate, fmtRemaining, table } = require('./util.js');
 const store = require('./store.js');
 const runner = require('./runner.js');
@@ -21,6 +22,8 @@ Accounts
   probe [name]            warm up quota gauges with a minimal request per
                           account (costs a few tokens; alias: warmup)
   log [count]             recent activity: switches, limits, rotations
+  history [count]         work history: request, result, account, duration, files
+  history show <id>       full details (use "latest" for the newest run)
   use <name>              make <name> the active account in ~/.codex
   current                 show the active account
   next                    switch to the next account in rotation order (wraps around)
@@ -37,7 +40,7 @@ Running codex
   chat                    interactive prompt loop (Claude Code-style): each turn
                           runs through rotation and resumes the same session,
                           so the conversation survives account switches
-                          (/usage /use /next /model /new /quit inside)
+                          (/status /usage /memory /use /next /model /new /quit)
   run [name] [args...]    run codex as <name> (or active account) in an isolated
                           per-account CODEX_HOME; config/sessions are shared
   exec [args...]          run "codex exec ..." and auto-rotate through accounts in
@@ -47,12 +50,16 @@ Running codex
       --no-resume         restart the prompt instead of resuming on rotation
   server [--port N]       EXPERIMENTAL local proxy: per-request account
                           rotation with live usage from response headers
-  run --proxy [args...]   run codex routed through the local proxy
+  server status           show whether the local proxy is reachable
+  run --proxy [args...]   use proxy when available, otherwise run directly
+      --require-proxy     fail instead of falling back when proxy is unavailable
 
 Settings
   model [name|default]    show/set the default model injected into run/exec
   reasoning [mode]        how much model reasoning to print during runs:
                           show (codex default) | concise | hide
+  output [mode]           exec/chat display: auto (compact on TTY, raw when
+                          piped) | compact (result + summary) | raw
   sandbox [mode]          file access for exec/chat: read-only (codex default)
                           | write (edit files in cwd) | write+net (also allow
                           ssh/curl/network) | full (no sandbox)
@@ -60,6 +67,8 @@ Settings
                           of the 5-hour / weekly window (default 95, one value = both)
   cooldown [minutes]      show/set rate-limit cooldown (default 60)
   patterns [add|remove]   extra regex patterns treated as rate-limit errors
+  memory [command]        cross-account memory for exec/chat: status, shared,
+                          isolated, off, add <text>, show [account], path [account]
 
 Maintenance
   sync                    save tokens refreshed by codex back into the store
@@ -284,6 +293,12 @@ function cmdRename(args) {
   if (store.accountExists(to)) throw new Error(`account "${to}" already exists`);
   store.writeAccountAuth(to, auth);
   fs.rmSync(store.accountPath(from), { force: true });
+  const oldMemory = store.memoryPath('isolated', from);
+  const newMemory = store.memoryPath('isolated', to);
+  if (fs.existsSync(oldMemory)) {
+    ensureDir(path.dirname(newMemory));
+    fs.renameSync(oldMemory, newMemory);
+  }
   const meta = store.loadMeta();
   meta.accounts[to] = meta.accounts[from] || { priority: 0 };
   delete meta.accounts[from];
@@ -503,6 +518,93 @@ function cmdLog(args) {
   }
 }
 
+function shortText(value, max = 56) {
+  const oneLine = String(value || '').replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms)) return '-';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+}
+
+function cmdHistory(args) {
+  if (args[0] === 'show') {
+    const id = requireArg(args, 1, 'history id (or "latest")');
+    const run = store.findRun(id);
+    if (!run) throw new Error(`no history entry matching "${id}"`);
+    out(`${ui.bold(run.id)}  ${run.status === 'done' ? ui.green('done') : ui.red(run.status)}`);
+    out(`${ui.dim('Started')}   ${fmtDate(run.startedAt)}`);
+    out(`${ui.dim('Duration')}  ${formatDuration(run.durationMs)}`);
+    out(`${ui.dim('Directory')} ${run.cwd || '-'}`);
+    out(`${ui.dim('Session')}   ${run.session} · memory ${run.memory} · reasoning ${run.reasoning}`);
+    out(`\n${ui.bold('Request')}\n${run.prompt || ui.dim('(not captured)')}`);
+    out(`\n${ui.bold('Attempts')}`);
+    for (const attempt of run.attempts || []) {
+      const paint = attempt.status === 'done' ? ui.green : attempt.status === 'rate-limited' ? ui.yellow : ui.red;
+      out(`  ${paint(attempt.status.padEnd(12))} ${attempt.account} · ${formatDuration(attempt.durationMs)}`);
+    }
+    out(`\n${ui.bold('Files changed during this run')}`);
+    if (run.touchedFiles && run.touchedFiles.length) run.touchedFiles.forEach((file) => out(`  ${file}`));
+    else out(ui.dim('  no file changes detected'));
+    out(`\n${ui.bold('Git workspace after run')}`);
+    if (run.files && run.files.length) run.files.forEach((file) => out(`  ${file}`));
+    else out(ui.dim('  clean'));
+    if (run.promptTruncated) out(ui.warn('\nRequest was truncated to the last 16 KiB in history.'));
+    return;
+  }
+  const count = args[0] == null ? 20 : parseInt(args[0], 10);
+  if (Number.isNaN(count) || count < 1 || count > 200) {
+    throw new Error('usage: codexswitch history [1-200] | history show <id|latest>');
+  }
+  const runs = store.readRuns(count);
+  if (runs.length === 0) {
+    out('no work history yet — exec, run <account> exec, and chat runs appear here');
+    return;
+  }
+  const rows = runs.map((run) => [
+    run.id,
+    fmtDate(run.startedAt),
+    run.status === 'done' ? ui.green('done') : ui.red(run.status),
+    (run.attempts || []).map((a) => a.account).join(' → ') || '-',
+    formatDuration(run.durationMs),
+    shortText(run.prompt),
+  ]);
+  out(table(rows, ['id', 'started', 'result', 'account flow', 'time', 'request']));
+  out(ui.dim('\nFull details: codexswitch history show <id>'));
+  out(ui.dim(`Stored locally in ${path.join(store.paths().home, 'history.jsonl')} (contains prompts)`));
+}
+
+function workspaceSnapshot() {
+  const result = spawnSync('git', ['status', '--short', '--untracked-files=all'], { cwd: process.cwd(), encoding: 'utf8' });
+  if (result.status !== 0 || !result.stdout) return {};
+  const snapshot = {};
+  for (const line of result.stdout.trim().split(/\r?\n/).filter(Boolean).slice(0, 100)) {
+    let file = line.slice(3);
+    if (file.includes(' -> ')) file = file.split(' -> ').pop();
+    if (file.startsWith('"')) {
+      try { file = JSON.parse(file); } catch { /* keep Git's displayed path */ }
+    }
+    try {
+      const stat = fs.statSync(path.resolve(file), { bigint: true });
+      snapshot[line] = `${stat.size}:${stat.mtimeNs}`;
+    } catch {
+      snapshot[line] = 'missing';
+    }
+  }
+  return snapshot;
+}
+
+function promptFromExecArgs(args) {
+  if (!args.length) return '';
+  const separator = args.lastIndexOf('--');
+  const value = args[args.length - 1];
+  if (separator < 0 && String(value).startsWith('-')) return '';
+  return String(value);
+}
+
 // Live interactive dashboard: usage gauges + recent activity, refreshed
 // every 5s. Keyboard: up/down select, s switch, e enable/disable, p probe,
 // r refresh, q quit.
@@ -666,8 +768,8 @@ function cmdNames() {
 }
 
 const COMMANDS =
-  'login import add-key list usage watch probe log chat server use current next run exec order model remove rename ' +
-  'enable disable priority clear-limit cooldown threshold reasoning sandbox patterns export restore sync completion help';
+  'login import add-key list usage watch probe log history chat server use current next run exec order model remove rename ' +
+  'enable disable priority clear-limit cooldown threshold reasoning output sandbox memory patterns export restore sync completion help';
 
 function cmdCompletion(args) {
   const shell = args[0];
@@ -793,9 +895,157 @@ function cmdReasoning(args) {
   );
 }
 
+function cmdOutput(args) {
+  const meta = store.loadMeta();
+  if (args[0] == null) {
+    out(`output: ${meta.outputMode || 'auto'} ${ui.dim('(auto | compact | raw)')}`);
+    out(ui.dim('auto uses compact output in a terminal and raw output when piped'));
+    return;
+  }
+  const mode = args[0];
+  if (!['auto', 'compact', 'raw'].includes(mode)) throw new Error('usage: codexswitch output <auto|compact|raw>');
+  if (mode === 'auto') delete meta.outputMode;
+  else meta.outputMode = mode;
+  store.saveMeta(meta);
+  out(ui.ok(`output set to ${mode}`));
+}
+
+function compactOutputEnabled(meta) {
+  const mode = meta.outputMode || 'auto';
+  return mode === 'compact' || (mode === 'auto' && process.stdout.isTTY);
+}
+
+function outputFileArg(args, file) {
+  if (args.some((a) => a === '-o' || a === '--output-last-message' || a.startsWith('--output-last-message='))) return args;
+  const result = [...args];
+  const resumeOffset = result[0] === 'resume' ? (result[1] === '--last' || /^[0-9a-f][0-9a-f-]{7,}$/i.test(result[1] || '') ? 2 : 1) : 0;
+  result.splice(resumeOffset, 0, '--output-last-message', file);
+  return result;
+}
+
+function existingOutputFile(args) {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-o' || args[i] === '--output-last-message') && args[i + 1]) return path.resolve(args[i + 1]);
+    if (args[i].startsWith('--output-last-message=')) return path.resolve(args[i].slice(args[i].indexOf('=') + 1));
+  }
+  return null;
+}
+
+function startCompactProgress(account, attempt, session) {
+  const started = Date.now();
+  const label = () => `Working · ${account} · ${session} session · ${Math.round((Date.now() - started) / 1000)}s`;
+  if (!process.stdout.isTTY) {
+    out(ui.info(label()));
+    return () => {};
+  }
+  const draw = () => process.stderr.write(`\r\x1b[2K${ui.cyan('●')} ${label()}`);
+  draw();
+  const timer = setInterval(draw, 1000);
+  return () => {
+    clearInterval(timer);
+    process.stderr.write('\r\x1b[2K');
+  };
+}
+
+function printCompactResult(message, run) {
+  out(`\n${ui.bold(ui.green('Result'))}`);
+  out(ui.dim('─'.repeat(48)));
+  out((message || '').trim() || ui.dim('(Codex returned no final message)'));
+  out(`\n${ui.bold('Work summary')}`);
+  out(ui.dim('─'.repeat(48)));
+  out(`${ui.green('✓')} ${run.status} · ${formatDuration(run.durationMs)} · ${(run.attempts || []).map((a) => a.account).join(' → ')}`);
+  if (run.touchedFiles && run.touchedFiles.length) {
+    out(`${ui.dim('Changed')} ${run.touchedFiles.length} file(s)`);
+    run.touchedFiles.slice(0, 12).forEach((file) => out(`  ${file}`));
+    if (run.touchedFiles.length > 12) out(ui.dim(`  … and ${run.touchedFiles.length - 12} more`));
+  } else {
+    out(ui.dim('Changed 0 files'));
+  }
+}
+
+function memoryTarget(meta, requestedAccount = null) {
+  if (meta.memoryMode !== 'isolated') return null;
+  const picked = store.pickAccount();
+  const name = requestedAccount || meta.active || (picked && picked.name);
+  if (!name || !store.accountExists(name)) throw new Error('isolated memory needs a valid account (activate one with "codexswitch use")');
+  return name;
+}
+
+function cmdMemory(args) {
+  const meta = store.loadMeta();
+  const sub = args[0];
+  if (!sub || sub === 'status') {
+    const mode = meta.memoryMode || 'off';
+    const account = mode === 'isolated' ? memoryTarget(meta) : null;
+    const file = mode === 'off' ? null : store.memoryPath(mode, account);
+    const size = file ? Buffer.byteLength(store.readMemory(mode, account), 'utf8') : 0;
+    out(`memory: ${ui.bold(mode)}${account ? ` · account ${ui.bold(account)}` : ''}`);
+    out(ui.dim(file ? `  ${size} bytes · ${file}` : '  disabled · existing Codex session files are still shared'));
+    if (mode === 'off') out(`  Enable: ${ui.cyan('codexswitch memory shared')} ${ui.dim('(shared across accounts)')}`);
+    return;
+  }
+  if (['shared', 'isolated', 'off'].includes(sub)) {
+    meta.memoryMode = sub;
+    store.saveMeta(meta);
+    if (sub === 'shared') out(ui.ok('shared memory enabled for exec/chat — all accounts read the same memory file'));
+    else if (sub === 'isolated') out(ui.ok('isolated memory enabled — each account reads only its own memory file'));
+    else out(ui.ok('memory injection disabled — stored memory files were kept'));
+    if (sub !== 'off') out(ui.dim(`add a note: codexswitch memory add "your note"`));
+    return;
+  }
+  const mode = meta.memoryMode || 'off';
+  if (mode === 'off') throw new Error('memory is off — choose "codexswitch memory shared" or "memory isolated" first');
+  if (sub === 'add') {
+    const account = memoryTarget(meta);
+    const text = args.slice(1).join(' ');
+    const file = store.appendMemory(mode, account, text);
+    out(ui.ok(`memory added${account ? ` for "${account}"` : ''}`));
+    out(ui.dim(file));
+    return;
+  }
+  if (sub === 'show') {
+    const target = memoryTarget(meta, args[1]);
+    const text = store.readMemory(mode, target);
+    out(text || ui.dim('(memory is empty)'));
+    return;
+  }
+  if (sub === 'path') {
+    out(store.memoryPath(mode, memoryTarget(meta, args[1])));
+    return;
+  }
+  throw new Error('usage: codexswitch memory [status|shared|isolated|off|add <text>|show [account]|path [account]]');
+}
+
+function withMemoryPrompt(args, accountName, meta) {
+  const mode = meta.memoryMode || 'off';
+  if (mode === 'off') return args;
+  const memory = store.readMemory(mode, mode === 'isolated' ? accountName : null).trim();
+  if (!memory) return args;
+  const result = [...args];
+  const separator = result.lastIndexOf('--');
+  const promptIndex = separator >= 0 && separator < result.length - 1
+    ? result.length - 1
+    : result.length > 0 && !String(result[result.length - 1]).startsWith('-')
+      ? result.length - 1
+      : -1;
+  if (promptIndex < 0) return result;
+  result[promptIndex] =
+    `<codexswitch-memory mode="${mode}">\n${memory}\n</codexswitch-memory>\n\n` +
+    `<user-request>\n${result[promptIndex]}\n</user-request>`;
+  return result;
+}
+
 // EXPERIMENTAL: foreground proxy server for per-request rotation.
 async function cmdServer(args) {
   const proxy = require('./proxy.js');
+  if (args[0] === 'status') {
+    const state = readJSONSafe(path.join(store.paths().home, 'proxy.json'));
+    const port = (state && state.port) || proxy.DEFAULT_PORT;
+    const running = await proxy.ping(port);
+    out(running ? ui.ok(`proxy running on http://127.0.0.1:${port}`) : ui.warn(`proxy not reachable on port ${port}`));
+    out(ui.dim(running ? `${store.listAccounts().length} account(s) available · per-request rotation active` : '"codexswitch run --proxy" will fall back to direct mode'));
+    return 0;
+  }
   let port = proxy.DEFAULT_PORT;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--port' || args[i] === '-p') port = parseInt(args[++i], 10);
@@ -827,13 +1077,18 @@ async function cmdServer(args) {
 async function cmdRun(args) {
   store.syncBack(); // pick up tokens refreshed by plain codex before overlaying
   let proxyPort = null;
+  const requireProxy = args.includes('--require-proxy');
+  args = args.filter((a) => a !== '--require-proxy');
   if (args.includes('--proxy')) {
     const proxy = require('./proxy.js');
     args = args.filter((a) => a !== '--proxy');
     const state = readJSONSafe(path.join(store.paths().home, 'proxy.json'));
     proxyPort = (state && state.port) || proxy.DEFAULT_PORT;
     if (!(await proxy.ping(proxyPort))) {
-      throw new Error(`no proxy on port ${proxyPort} — start it first with "codexswitch server"`);
+      if (requireProxy) throw new Error(`no proxy on port ${proxyPort} — start it first with "codexswitch server"`);
+      out(ui.warn(`proxy unavailable on port ${proxyPort} — running directly with the selected account`));
+      out(ui.dim('use --require-proxy to fail instead of falling back'));
+      proxyPort = null;
     }
   }
   let name = null;
@@ -849,9 +1104,10 @@ async function cmdRun(args) {
     name = meta.active && store.accountExists(meta.active) ? meta.active : picked.name;
   }
   if (rest[0] === '--') rest = rest.slice(1);
+  const rawExecArgs = rest[0] === 'exec' ? rest.slice(1) : null;
   const meta = store.loadMeta();
   if (rest[0] === 'exec') {
-    rest = ['exec', ...buildExecArgs(rest.slice(1), meta)];
+    rest = ['exec', ...buildExecArgs(withMemoryPrompt(rest.slice(1), name, meta), meta)];
   } else if (rest.length === 0) {
     // interactive TUI launch — apply the same defaults
     if (meta.model) rest = ['-m', meta.model];
@@ -859,8 +1115,30 @@ async function cmdRun(args) {
   }
   out(ui.info(`running codex as ${ui.bold(`"${name}"`)}${proxyPort ? ui.dim(` via proxy :${proxyPort}`) : ''}`));
   const startTs = Date.now();
+  const before = rawExecArgs ? workspaceSnapshot() : null;
   const res = await runner.runCodex(name, rest, { proxyPort });
   runner.recordUsage(name, res.profile, startTs);
+  if (rawExecArgs) {
+    const rawPrompt = promptFromExecArgs(rawExecArgs);
+    const after = workspaceSnapshot();
+    const id = `${startTs.toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+    store.logRun({
+      id,
+      startedAt: startTs,
+      cwd: process.cwd(),
+      prompt: rawPrompt.length > 16384 ? rawPrompt.slice(-16384) : rawPrompt,
+      promptTruncated: rawPrompt.length > 16384,
+      session: rawExecArgs[0] === 'resume' ? 'continue' : 'new',
+      memory: meta.memoryMode || 'off',
+      reasoning: meta.reasoning || 'show',
+      status: res.code === 0 ? 'done' : `failed-${res.code}`,
+      durationMs: Date.now() - startTs,
+      attempts: [{ account: name, status: res.code === 0 ? 'done' : `exit-${res.code}`, durationMs: Date.now() - startTs }],
+      files: Object.keys(after),
+      touchedFiles: Object.keys({ ...before, ...after }).filter((file) => before[file] !== after[file]),
+    });
+    console.error(ui.info(ui.dim(`history ${id} · view: codexswitch history show ${id}`)));
+  }
   return res.code;
 }
 
@@ -894,8 +1172,42 @@ async function cmdExec(args) {
   const meta = store.loadMeta();
   const sessionMode = rest[0] === 'resume' ? 'continue' : 'new';
   const reasoningMode = meta.reasoning || 'show';
+  const compact = compactOutputEnabled(meta);
+  const userOutputFile = existingOutputFile(rest);
+  const lastMessageFile = userOutputFile || path.join(os.tmpdir(), `codexswitch-result-${process.pid}-${Date.now()}.txt`);
+  const cleanupResult = () => {
+    if (!userOutputFile) fs.rmSync(lastMessageFile, { force: true });
+  };
   const total = store.listAccounts().length;
   if (total === 0) throw new Error('no accounts — add one with "codexswitch login"');
+
+  const historyStarted = Date.now();
+  const rawPrompt = promptFromExecArgs(rest);
+  const promptTruncated = rawPrompt.length > 16384;
+  const runRecord = {
+    id: `${historyStarted.toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+    startedAt: historyStarted,
+    cwd: process.cwd(),
+    prompt: promptTruncated ? rawPrompt.slice(-16384) : rawPrompt,
+    promptTruncated,
+    session: sessionMode,
+    memory: meta.memoryMode || 'off',
+    reasoning: reasoningMode,
+    status: 'running',
+    attempts: [],
+    workspaceBefore: workspaceSnapshot(),
+  };
+  const finishHistory = (status) => {
+    runRecord.status = status;
+    runRecord.durationMs = Date.now() - historyStarted;
+    const after = workspaceSnapshot();
+    runRecord.files = Object.keys(after);
+    runRecord.touchedFiles = Object.keys({ ...runRecord.workspaceBefore, ...after }).filter(
+      (file) => runRecord.workspaceBefore[file] !== after[file]
+    );
+    delete runRecord.workspaceBefore;
+    store.logRun(runRecord);
+  };
 
   const tried = [];
   let useResume = false;
@@ -909,28 +1221,47 @@ async function cmdExec(args) {
       name = picked.name;
     }
     tried.push(name);
-    console.error(
-      ui.info(
-        `account ${ui.bold(`"${name}"`)}${ui.dim(` · session ${useResume || sessionMode === 'continue' ? 'continue' : 'new'} · reasoning ${reasoningMode}`)}` +
-          `${ui.dim(attempt > 0 ? ` · attempt ${attempt + 1}` : '')}`
-      )
-    );
+    if (!compact) {
+      console.error(
+        ui.info(
+          `account ${ui.bold(`"${name}"`)}${ui.dim(` · session ${useResume || sessionMode === 'continue' ? 'continue' : 'new'} · reasoning ${reasoningMode}`)}` +
+            `${ui.dim(attempt > 0 ? ` · attempt ${attempt + 1}` : '')}`
+        )
+      );
+    }
     // On rotation, continue the same session with the next account instead
     // of restarting the whole prompt — the session files are shared.
-    const codexArgs = useResume
-      ? ['exec', 'resume', '--last', ...buildExecArgs([], meta), '--', RESUME_PROMPT]
-      : ['exec', ...buildExecArgs(rest, meta)];
+    const memoryArgs = useResume
+      ? withMemoryPrompt(['resume', '--last', '--', RESUME_PROMPT], name, meta)
+      : withMemoryPrompt(rest, name, meta);
+    const displayArgs = compact ? outputFileArg(memoryArgs, lastMessageFile) : memoryArgs;
+    const codexArgs = ['exec', ...buildExecArgs(displayArgs, meta)];
     const startTs = Date.now();
-    const res = await runner.runCodex(name, codexArgs, { capture: true });
+    const stopProgress = compact
+      ? startCompactProgress(name, attempt + 1, useResume || sessionMode === 'continue' ? 'continued' : 'new')
+      : () => {};
+    const res = await runner.runCodex(name, codexArgs, { capture: true, silent: compact });
+    stopProgress();
     runner.recordUsage(name, res.profile, startTs);
     if (res.code === 0) {
+      runRecord.attempts.push({ account: name, status: 'done', durationMs: Date.now() - startTs });
       store.clearLimited(name);
-      console.error(ui.ok(`done as ${ui.bold(`"${name}"`)}`));
+      if (!compact) console.error(ui.ok(`done as ${ui.bold(`"${name}"`)}`));
       store.logEvent('exec', `done as "${name}"${useResume ? ' (resumed session)' : ''}`);
       warnIfOverThreshold(name);
+      finishHistory('done');
+      if (compact) {
+        const finalMessage = (() => {
+          try { return fs.readFileSync(lastMessageFile, 'utf8'); } catch { return ''; }
+        })();
+        printCompactResult(finalMessage, runRecord);
+      }
+      cleanupResult();
+      console.error(ui.info(ui.dim(`history ${runRecord.id} · view: codexswitch history show ${runRecord.id}`)));
       return 0;
     }
     if (runner.looksRateLimited(res.output, meta.limitPatterns)) {
+      runRecord.attempts.push({ account: name, status: 'rate-limited', durationMs: Date.now() - startTs });
       const until = Date.now() + runner.limitCooldownMs(res.output, meta.cooldownMinutes);
       store.markLimited(name, until);
       if (allowResume && !useResume && runner.sessionTouchedSince(res.profile, startTs)) {
@@ -943,6 +1274,7 @@ async function cmdExec(args) {
       continue;
     }
     if (runner.looksAuthFailed(res.output)) {
+      runRecord.attempts.push({ account: name, status: 'auth-failed', durationMs: Date.now() - startTs });
       // A revoked token won't heal by itself — take the account out of
       // rotation and keep the task going on the next one.
       setFlag(name, { disabled: true });
@@ -952,9 +1284,19 @@ async function cmdExec(args) {
       store.logEvent('auth', `"${name}" disabled (revoked login)`);
       continue;
     }
+    runRecord.attempts.push({ account: name, status: `exit-${res.code}`, durationMs: Date.now() - startTs });
+    finishHistory(`failed-${res.code}`);
+    if (compact) {
+      console.error(ui.fail('Codex failed'));
+      console.error(res.output.trim().split(/\r?\n/).slice(-12).join('\n'));
+    }
+    cleanupResult();
     return res.code; // real failure, don't burn other accounts on it
   }
   console.error(ui.fail('all accounts are rate-limited, over threshold, or disabled'));
+  finishHistory('exhausted');
+  cleanupResult();
+  console.error(ui.info(ui.dim(`history ${runRecord.id} · view: codexswitch history show ${runRecord.id}`)));
   return 2;
 }
 
@@ -972,7 +1314,7 @@ async function cmdChat() {
     const currentMeta = store.loadMeta();
     const active = store.listAccounts().find((a) => a.active);
     const next = store.pickAccount();
-    return `model ${currentMeta.model || 'default'} · reasoning ${currentMeta.reasoning || 'show'} · account ${(active && active.name) || (next && next.name) || 'none'}`;
+    return `model ${currentMeta.model || 'default'} · reasoning ${currentMeta.reasoning || 'show'} · output ${currentMeta.outputMode || 'auto'} · memory ${currentMeta.memoryMode || 'off'} · account ${(active && active.name) || (next && next.name) || 'none'}`;
   };
   out(`${ui.bold('codexswitch chat')} ${ui.dim(`· ${chatStatus()}`)}`);
   out(ui.dim('Enter sends · /paste starts multiline input · /help lists commands\n'));
@@ -1013,8 +1355,9 @@ async function cmdChat() {
       try {
         if (cmd === 'quit' || cmd === 'exit' || cmd === 'q') break;
         else if (cmd === 'help')
-          out(ui.dim('/status /usage /list /use <name> /next /model [m] /sandbox [mode] /reasoning [mode] /paste /new /quit'));
+          out(ui.dim('/status /history [id] /usage /list /use <name> /next /model [m] /sandbox [mode] /reasoning [mode] /output [mode] /memory [command] /paste /new /quit'));
         else if (cmd === 'status') out(ui.info(chatStatus()));
+        else if (cmd === 'history') cmdHistory(rest.length ? ['show', rest[0]] : []);
         else if (cmd === 'usage') cmdUsage([]);
         else if (cmd === 'list') cmdList();
         else if (cmd === 'use') cmdUse(rest);
@@ -1022,6 +1365,8 @@ async function cmdChat() {
         else if (cmd === 'model') cmdModel(rest);
         else if (cmd === 'sandbox') cmdSandbox(rest);
         else if (cmd === 'reasoning') cmdReasoning(rest);
+        else if (cmd === 'output') cmdOutput(rest);
+        else if (cmd === 'memory') cmdMemory(rest);
         else if (cmd === 'new') {
           inSession = false;
           turn = 0;
@@ -1112,6 +1457,9 @@ async function main(argv) {
     case 'log':
     case 'activity':
       return cmdLog(args), 0;
+    case 'history':
+    case 'work':
+      return cmdHistory(args), 0;
     case 'use':
       return cmdUse(args), 0;
     case 'current':
@@ -1140,8 +1488,12 @@ async function main(argv) {
       return cmdModel(args), 0;
     case 'reasoning':
       return cmdReasoning(args), 0;
+    case 'output':
+      return cmdOutput(args), 0;
     case 'sandbox':
       return cmdSandbox(args), 0;
+    case 'memory':
+      return cmdMemory(args), 0;
     case 'add-key':
     case 'apikey':
       return cmdAddKey(args), 0;

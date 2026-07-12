@@ -16,6 +16,7 @@ const store = require('./store.js');
 
 const DEFAULT_PORT = 8437;
 const MAX_BODY = 32 * 1024 * 1024;
+const RATE_LIMIT_ABSORB_MAX_MS = 60000;
 
 function upstreamBase() {
   return new URL(process.env.CODEX_SWITCH_UPSTREAM || 'https://chatgpt.com');
@@ -60,6 +61,29 @@ function usageFromHeaders(headers) {
   const weekly = win(wins.secondary);
   if (!p5h && !weekly) return null;
   return { p5h, weekly, at };
+}
+
+function retryAfterMs(headers, now = Date.now()) {
+  const value = headers['retry-after'];
+  if (value == null) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, date - now);
+}
+
+// Inspired by teamclaude: a quota rejection should rotate immediately, while
+// a short per-minute throttle should stay on the same account to preserve its
+// prompt cache and avoid cascading the burst across every account.
+function classify429(headers, usage, meta) {
+  const rejected = Object.entries(headers).some(
+    ([key, value]) => /(?:codex|quota|limit).*(?:status|state)/i.test(key) && /rejected|exhausted|quota/i.test(String(value))
+  );
+  const overQuota = [
+    usage && usage.p5h && [usage.p5h.pct, meta.threshold5h],
+    usage && usage.weekly && [usage.weekly.pct, meta.thresholdWeekly],
+  ].some((pair) => pair && pair[0] >= pair[1]);
+  return rejected || overQuota ? 'quota' : 'rate';
 }
 
 function swapHeaders(headers, acct, host) {
@@ -129,6 +153,7 @@ function startServer({ port = DEFAULT_PORT, log = () => {} } = {}) {
     const meta = store.loadMeta();
     const total = store.listAccounts().length;
     const tried = [];
+    const absorbed = new Set();
     for (let attempt = 0; attempt < Math.max(1, total); attempt++) {
       const acct = pickAuth(tried);
       if (!acct) {
@@ -147,12 +172,32 @@ function startServer({ port = DEFAULT_PORT, log = () => {} } = {}) {
       }
       const usage = usageFromHeaders(upRes.headers);
       if (usage) store.saveUsage(acct.name, usage);
-      if (upRes.statusCode === 429 && tried.length < total) {
-        store.markLimited(acct.name, Date.now() + meta.cooldownMinutes * 60000);
-        store.logEvent('limit', `proxy: "${acct.name}" got 429 — rotating`);
-        log('rotate', `${acct.name} hit 429 -> trying next account`);
-        upRes.resume(); // discard
-        continue;
+      if (upRes.statusCode === 429) {
+        const kind = classify429(upRes.headers, usage, meta);
+        const retryMs = retryAfterMs(upRes.headers);
+        if (kind === 'rate') {
+          if (retryMs != null && retryMs <= RATE_LIMIT_ABSORB_MAX_MS && !absorbed.has(acct.name)) {
+            absorbed.add(acct.name);
+            log('rate', `${acct.name} throttled for ${Math.ceil(retryMs)}ms — retrying same account`);
+            upRes.resume();
+            await new Promise((resolve) => setTimeout(resolve, retryMs));
+            tried.pop();
+            attempt--;
+            continue;
+          }
+          const pauseMs = retryMs == null ? Math.min(meta.cooldownMinutes * 60000, RATE_LIMIT_ABSORB_MAX_MS) : retryMs;
+          store.markLimited(acct.name, Date.now() + pauseMs);
+          store.logEvent('limit', `proxy: "${acct.name}" temporarily throttled — not rotating`);
+          log('rate', `${acct.name} temporarily throttled — preserving account cache`);
+        } else if (tried.length < total) {
+          store.markLimited(acct.name, Date.now() + meta.cooldownMinutes * 60000);
+          store.logEvent('limit', `proxy: "${acct.name}" quota exhausted — rotating`);
+          log('rotate', `${acct.name} quota exhausted -> trying next account`);
+          upRes.resume();
+          continue;
+        } else {
+          store.markLimited(acct.name, Date.now() + meta.cooldownMinutes * 60000);
+        }
       }
       log('req', `${acct.name} ${req.method} ${req.url} -> ${upRes.statusCode}`);
       res.writeHead(upRes.statusCode, upRes.headers);
@@ -217,4 +262,4 @@ function ping(port) {
   });
 }
 
-module.exports = { startServer, ping, DEFAULT_PORT, usageFromHeaders };
+module.exports = { startServer, ping, DEFAULT_PORT, usageFromHeaders, retryAfterMs, classify429 };
